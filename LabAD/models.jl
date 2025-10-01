@@ -28,7 +28,7 @@ function tanh_activation(W, X)
 end
 
 ########## ReLU ############
-
+## modifiying max  this function call vectnode directly some how 
 function relu(x)
     return max(0, x)
 end

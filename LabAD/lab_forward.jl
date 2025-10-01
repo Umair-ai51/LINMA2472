@@ -85,7 +85,9 @@ plot_moon(identity_activation, w, X, y)
 # we use a `tanh` activation function.
 # Let's start with new random weights
 
+
 w = random_weights(X, y, num_hidden)
+
 L = loss(mse, tanh_activation, X, y)
 
 # We see now that the model is nonlinear but still untrained
@@ -97,7 +99,12 @@ plot_moon(tanh_activation, w, X, y)
 # If we try to compute the gradient, we get an error, replace it with
 # a correct implementation.
 # *Hint:* ``tanh(x)' = 1 - tanh(x)^2``
+
+# define loss as function of weights
+
+
 Forward.gradient(L, w)
+
 
 losses = train!(Forward.gradient!, L, w)
 
@@ -121,12 +128,13 @@ plot_moon(relu_activation, w, X, y)
 
 # ## Exercise 2
 
-# FIXME This time we didn't add a placeholder function throwing an error so we get
+# FIX ME This time we didn't add a placeholder function throwing an error so we get
 # a `MethodError` saything that the method `isless(::Dual, ::Int)` is missing
 # 3 choices here:
 # 1) implement `isless(::Dual, ::Real)`
 # 2) implement `max(::Real, ::Dual)`
 # 3) implement `relu(::Dual)`
+
 L = loss(mse, relu_activation, X, y)
 Forward.gradient(L, w)
 
@@ -152,6 +160,7 @@ plot_moon(relu_softmax, w, X, y)
 
 # If we try computing the gradient, we get errors!
 # Fix them to complete this exercise
+ include(joinpath(@__DIR__, "forward.jl"))
 
 L = loss(cross_entropy, relu_softmax, X, Y_encoded)
 Forward.gradient(L, w)
@@ -174,3 +183,31 @@ plot_moon(relu_softmax, w, X, y)
 #         so you can start by implementing a Jacobian
 #         function and then combine it with the existing gradient
 #         function to get the hessian.
+
+function jacobian(f, x::Vector{Float64}; eps = 1e-8)
+    
+    fx = f(x)
+    
+    n = length(x)
+    m = length(fx)
+
+    J = zeros(m, n)
+    
+    for i in 1:n
+        x_eps = copy(x)
+        x_eps[i] += eps
+        J[:,i] = (f(x_eps) - fx) / eps
+     
+    end
+
+    return J
+end
+
+
+function hessian(loss, x::Vector{Float64})
+    grad_fun = y -> Forward.gradient(loss, y)
+    return jacobian(grad_fun, x)
+end
+x = rand(2)          # example input
+H = hessian(quad, x) # compute Hessian of your quadratic function
+println(H)
