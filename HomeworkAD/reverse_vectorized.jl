@@ -17,35 +17,40 @@ function Base.broadcasted(op::Function, x::VectNode)
 	result_val =  op.(x.value)
 	
 	#return the reuslt in the node.
-	return VectNode(symbol(op), [x], result_val)
+	return VectNode(Symbol(op), [x], result_val)
 
 end
 
 # For `X .* Y`
 function Base.broadcasted(op::Function, x::VectNode, y::VectNode)
-    
+	result = broadcast(op, x.value, y.value)
+	return VectNode(Symbol(op), [x, y], result)
 end
 
 
 # For `X .* Y` where `Y` is a constant
 function Base.broadcasted(op::Function, x::VectNode, y::Union{AbstractArray,Number})
-    error("TODO")
+		result = x.value .* y
+		return VectNode(Symbol(op), [x, y], result)
 end
 
 # For `X .* Y` where `X` is a constant
 function Base.broadcasted(op::Function, x::Union{AbstractArray,Number}, y::VectNode)
-    error("TODO")
+		result = x .* y.value
+		return VectNode(Symbol(op), [x, y], result)
 end
 
 # For `x .^ 2`
 function Base.broadcasted(::typeof(Base.literal_pow), ::typeof(^), x::VectNode, ::Val{y}) where {y}
-	Base.broadcasted(^, x, y)
+	# Base.broadcasted(^, x, y)
+	result = x.value .^ y
+	return VectNode(:^, [x], result)  # or whatever structure you use
 end
 
 
 ## by default julisa does not know how broadcast the vect node if we get a scaler node
 ## Throw the arrow of length 
-Base.broadcastable(x::VectNode) = Ref(x)
+#Base.broadcastable(x::VectNode) = Ref(x)
 
 ## intitalize the nodes derivatives to zero
 
@@ -148,17 +153,24 @@ Base.sum(x::VectNode) = VectNode(:sum, [x], sum(x.value))
 ## Internally in relu we used max which uses is less so if x.val is a value then ok if not 
 ## We need to over the max operator accordingly as well.
 ## Not calls is less.
-Base.max(x::VectNode, y::Number) = VectNode(:relu, [x], max.(x.value, y))
-Base.max(x::Number, y::VectNode) = VectNode(:relu, [y], max.(x, y.value))
-Base.max(x::VectNode, y::VectNode) = VectNode(:relu, [x, y], max.(x.value, y.value))
+#Base.max(x::VectNode, y::Number) = VectNode(:relu, [x], max.(x.value, y))
+#Base.max(x::Number, y::VectNode) = VectNode(:relu, [y], max.(x, y.value))
+#Base.max(x::VectNode, y::VectNode) = VectNode(:relu, [x, y], max.(x.value, y.value))
 
 
 
-function relu(x::VectNode)
+#function relu(x::VectNode)
 
-	return VectNode(:relu,[x], max.(0.0, x.value))
+#	return VectNode(:relu,[x], max.(0.0, x.value))
 
-end
+#end
+#--------------------------
+#function relu(x::VectNode)
+    # Elementwise max with 0
+#    VectNode(:relu, [x], max.(0.0, x.value))
+#end
+
+#-------------------------
 
 function topo_sort(f::VectNode)
 	
@@ -188,7 +200,55 @@ function topo_sort(f::VectNode)
 	return topological_order
 	
 end
-
+#--------------------------------------
+#= function backward_relu!(node::VectNode)
+    arg = node.args[1]
+    
+    # Debug prints
+    println("=== RELU BACKWARD DEBUG ===")
+    println("arg.value type: ", typeof(arg.value))
+    println("arg.value size: ", size(arg.value))
+    println("arg.value: ", arg.value)
+    println("node.derivative type: ", typeof(node.derivative))
+    println("node.derivative size: ", size(node.derivative))
+    println("node.derivative: ", node.derivative)
+    println("arg.derivative type: ", typeof(arg.derivative))
+    println("arg.derivative size: ", size(arg.derivative))
+    println("arg.derivative: ", arg.derivative)
+    
+    # Compute gradient elementwise (1 where x > 0, 0 elsewhere)
+    relu_grad = float.(arg.value .> 0)
+    println("relu_grad type: ", typeof(relu_grad))
+    println("relu_grad size: ", size(relu_grad))
+    println("relu_grad: ", relu_grad)
+    
+    # Extract scalar if 0-dimensional
+    grad = ndims(node.derivative) == 0 ? node.derivative[] : node.derivative
+    println("grad (after extraction) type: ", typeof(grad))
+    println("grad: ", grad)
+    
+    # Accumulate gradient
+    result = grad .* relu_grad
+    println("result type: ", typeof(result))
+    println("result: ", result)
+    
+    arg.derivative .+= result
+    println("arg.derivative after update: ", arg.derivative)
+    println("=========================\n")
+end =#
+function backward_relu!(node::VectNode)
+    arg = node.args[1]
+    
+    # CRITICAL: Check where the OUTPUT (node.value) is > 0, not the input!
+    relu_grad = float.(node.value .> 0)
+    
+    # Extract scalar if 0-dimensional
+    grad = ndims(node.derivative) == 0 ? node.derivative[] : node.derivative
+    
+    # Accumulate gradient
+    arg.derivative .+= grad .* relu_grad
+end
+#-------------------------------------
 
 # We assume `Flatten` has been defined in the parent module.
 # If this fails, run `include("/path/to/Flatten.jl")` before
@@ -309,12 +369,13 @@ function backward!(f::VectNode)
 			arg.derivative .+= node.derivative ./ arg.value
 	
 		elseif node.op ==:relu
-			arg = node.args[1]
+			#arg = node.args[1]
 
 			## Apply relu function
-			relu_grad = (arg.value .> 0) 
-			arg.derivative .+= node.derivative .* relu_grad
-		
+			#relu_grad = (arg.value .> 0) 
+			#arg.derivative .+= node.derivative .* relu_grad
+			backward_relu!(node)
+
 		elseif node.op ==:exp
 			arg = node.args[1]
 			arg.derivative .+=  node.derivative * node.value

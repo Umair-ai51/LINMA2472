@@ -8,6 +8,7 @@ include(joinpath(LabAD, "solution", "forward.jl"))
 ## First order
 
 include(joinpath(@__DIR__, "reverse_vectorized.jl"))
+
 run_gradient_tests(Forward.gradient, VectReverse.gradient)
 
 
