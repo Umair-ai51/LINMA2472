@@ -8,6 +8,41 @@ mutable struct VectNode
 	derivative::Any
 end
 
+#correctly broadcasting to minimise the errros 
+
+
+# For `tanh.(X)`
+function Base.broadcasted(op::Function, x::VectNode)
+    ## apply the function elementwise
+	result_val =  op.(x.value)
+	
+	#return the reuslt in the node.
+	return VectNode(symbol(op), [x], result_val)
+
+end
+
+# For `X .* Y`
+function Base.broadcasted(op::Function, x::VectNode, y::VectNode)
+    
+end
+
+
+# For `X .* Y` where `Y` is a constant
+function Base.broadcasted(op::Function, x::VectNode, y::Union{AbstractArray,Number})
+    error("TODO")
+end
+
+# For `X .* Y` where `X` is a constant
+function Base.broadcasted(op::Function, x::Union{AbstractArray,Number}, y::VectNode)
+    error("TODO")
+end
+
+# For `x .^ 2`
+function Base.broadcasted(::typeof(Base.literal_pow), ::typeof(^), x::VectNode, ::Val{y}) where {y}
+	Base.broadcasted(^, x, y)
+end
+
+
 ## by default julisa does not know how broadcast the vect node if we get a scaler node
 ## Throw the arrow of length 
 Base.broadcastable(x::VectNode) = Ref(x)
