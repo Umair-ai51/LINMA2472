@@ -57,6 +57,11 @@ end
 
 ## intitalize the nodes derivatives to zero
 
+function relu(x::VectNode)
+    return VectNode(:relu, [x], max.(0, x.value))
+end
+
+
 function VectNode(op, args, value)
     if isa(value, Number)
         derivative = zero(value)     # scalar derivative
@@ -225,13 +230,11 @@ function backward!(f::VectNode)
 		elseif node.op == :*
 			x, y = node.args
 			xv, yv = x.value, y.value
-			# grad may be a 0-d array or scalar; extract scalar if needed
-			
-			println("shape of grad_ in before  extractions ", size( node.derivative))
-
 			grad = node.derivative
-
+			
+			println("shape of grad_ in before  extractions ", size(grad))
 			println("shape of grad_ in after extractions ", size(grad))
+			
 			# scalar * scalar -> scalar
 			if isa(xv, Number) && isa(yv, Number)
 				x.derivative += grad * yv
@@ -239,34 +242,28 @@ function backward!(f::VectNode)
 
 			# vector (n) dot vector (n) -> scalar: xv' * yv
 			elseif isa(xv, AbstractVector) && isa(yv, AbstractVector) && ndims(xv) == 1 && ndims(yv) == 1
-				# node.value is scalar; grad is scalar
-				x.derivative .+= grad * yv       # scalar * vector
+				x.derivative .+= grad * yv
 				y.derivative .+= grad * xv
 
 			# matrix * matrix (or matrix * vector) -> general matrix multiplication
 			elseif isa(xv, AbstractArray) && isa(yv, AbstractArray)
-				# node.value shape is (m,p) when xv is (m,n) and yv is (n,p)
-				# ∂L/∂x = grad * yv'   (grad has shape (m,p))
-				# ∂L/∂y = xv' * grad
-				x.derivative .+= grad * permutedims(yv)  # yv'  (works for 2D)
-				y.derivative .+= permutedims(xv) * grad  # xv'
+				# Simply replace permutedims with transpose (')
+				x.derivative .+= grad * yv'
+				y.derivative .+= xv' * grad
 
 			# mixed: x is array, y is scalar
 			elseif isa(xv, AbstractArray) && isa(yv, Number)
-				x.derivative .+= node.derivative .* yv
-				# y gets sum over elementwise product
-				y.derivative += sum(node.derivative .* xv)
+				x.derivative .+= grad .* yv
+				y.derivative += sum(grad .* xv)
 
 			# mixed: x scalar, y array
 			elseif isa(xv, Number) && isa(yv, AbstractArray)
-				# x gets sum over elementwise product
-				x.derivative += sum(node.derivative .* yv)
-				y.derivative .+= node.derivative .* xv
+				x.derivative += sum(grad .* yv)
+				y.derivative .+= grad .* xv
 
 			else
 				error("Unhandled * case with types: $(typeof(xv)), $(typeof(yv))")
 			end
-
 		 #--------------------------
 		elseif node.op ==:/
 			## two case L = x/y
@@ -309,7 +306,7 @@ function backward!(f::VectNode)
 			arg = node.args[1]
 
 			## Apply relu function
-			relu_grad = (arg.value .> 0) 
+			relu_grad = float.(arg.value .>= 0) 
 			
 			## -- Debug Prints ----
 			println("node.value shape :" , size(node.value))
