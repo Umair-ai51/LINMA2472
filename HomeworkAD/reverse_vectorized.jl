@@ -50,14 +50,22 @@ end
 
 ## by default julisa does not know how broadcast the vect node if we get a scaler node
 ## Throw the arrow of length 
+## This will treat vectNode as scaler object and
+## if the sum of that will give zero D vector which is an array stored a scaler (completely wrong)
+
 #Base.broadcastable(x::VectNode) = Ref(x)
 
 ## intitalize the nodes derivatives to zero
 
-#VectNode(op, args, value) = VectNode(op, args, value, zeros(size(value)))
-
-## Define constructor not to worry about the values that are zero
-VectNode(op, args, value) = VectNode(op, args, value, zeros(size(value)))
+function VectNode(op, args, value)
+    if isa(value, Number)
+        derivative = zero(value)     # scalar derivative
+    else
+        derivative = zeros(size(value))
+    end
+    return VectNode(op, args, value, derivative)
+end
+#-------------------------
 
 ## Defining Constructors for the inputs
 ## For AbstractMatrix
@@ -87,16 +95,15 @@ Base.:-(x::AbstractArray, y::VectNode) = VectNode(:-, [VectNode(x), y], x .- y.v
 
 ## Error of conversion 
 ## Error of dimensionality
-## It does not 
 
 #MethodError Julia does not know what this is 
 #Base.:*(x::VectNode, y::VectNode) = VectNode(:* ,[x, y], x.value * y.value) 
 
-# Overwriting global vector multiplication
-# infinite recursion 
-# because x * y inside calls the same method again
-
-#Base.:*(x::AbstractVector, y::AbstractVector) = VectNode(:*, [x, y], x * y)  #No method exit for this combination or stackoverflow 
+#= Overwriting global vector multiplication
+	infinite recursion 
+	because x * y inside calls the same method again
+	Base.:*(x::AbstractVector, y::AbstractVector) = VectNode(:*, [x, y], x * y)  #No method exit for this combination or stackoverflow 
+ =#
 
 #A::Matrix * B::Vector   # matrix–vector multiplication ✅
 #A::Vector' * B::Vector  # dot product (row vector × column vector) ✅
@@ -142,35 +149,6 @@ Base.log(x::VectNode) = VectNode(:log, [x], log(x.value))
 ## Defining sum
 Base.sum(x::VectNode) = VectNode(:sum, [x], sum(x.value))
 
-## ISLESS
-#Base.isless(x::VectNode, y::Number) = isless(x.value, y)
-#Base.isless(x::Number, y::VectNode) = isless(x, y.value)
-#Base.isless(x::VectNode, y::VectNode) = isless(x.value, y.value)
-
-
-
-## MAX - needed for relu operations
-## Internally in relu we used max which uses is less so if x.val is a value then ok if not 
-## We need to over the max operator accordingly as well.
-## Not calls is less.
-#Base.max(x::VectNode, y::Number) = VectNode(:relu, [x], max.(x.value, y))
-#Base.max(x::Number, y::VectNode) = VectNode(:relu, [y], max.(x, y.value))
-#Base.max(x::VectNode, y::VectNode) = VectNode(:relu, [x, y], max.(x.value, y.value))
-
-
-
-#function relu(x::VectNode)
-
-#	return VectNode(:relu,[x], max.(0.0, x.value))
-
-#end
-#--------------------------
-#function relu(x::VectNode)
-    # Elementwise max with 0
-#    VectNode(:relu, [x], max.(0.0, x.value))
-#end
-
-#-------------------------
 
 function topo_sort(f::VectNode)
 	
@@ -200,55 +178,6 @@ function topo_sort(f::VectNode)
 	return topological_order
 	
 end
-#--------------------------------------
-#= function backward_relu!(node::VectNode)
-    arg = node.args[1]
-    
-    # Debug prints
-    println("=== RELU BACKWARD DEBUG ===")
-    println("arg.value type: ", typeof(arg.value))
-    println("arg.value size: ", size(arg.value))
-    println("arg.value: ", arg.value)
-    println("node.derivative type: ", typeof(node.derivative))
-    println("node.derivative size: ", size(node.derivative))
-    println("node.derivative: ", node.derivative)
-    println("arg.derivative type: ", typeof(arg.derivative))
-    println("arg.derivative size: ", size(arg.derivative))
-    println("arg.derivative: ", arg.derivative)
-    
-    # Compute gradient elementwise (1 where x > 0, 0 elsewhere)
-    relu_grad = float.(arg.value .> 0)
-    println("relu_grad type: ", typeof(relu_grad))
-    println("relu_grad size: ", size(relu_grad))
-    println("relu_grad: ", relu_grad)
-    
-    # Extract scalar if 0-dimensional
-    grad = ndims(node.derivative) == 0 ? node.derivative[] : node.derivative
-    println("grad (after extraction) type: ", typeof(grad))
-    println("grad: ", grad)
-    
-    # Accumulate gradient
-    result = grad .* relu_grad
-    println("result type: ", typeof(result))
-    println("result: ", result)
-    
-    arg.derivative .+= result
-    println("arg.derivative after update: ", arg.derivative)
-    println("=========================\n")
-end =#
-function backward_relu!(node::VectNode)
-    arg = node.args[1]
-    
-    # CRITICAL: Check where the OUTPUT (node.value) is > 0, not the input!
-    relu_grad = float.(node.value .> 0)
-    
-    # Extract scalar if 0-dimensional
-    grad = ndims(node.derivative) == 0 ? node.derivative[] : node.derivative
-    
-    # Accumulate gradient
-    arg.derivative .+= grad .* relu_grad
-end
-#-------------------------------------
 
 # We assume `Flatten` has been defined in the parent module.
 # If this fails, run `include("/path/to/Flatten.jl")` before
@@ -293,44 +222,52 @@ function backward!(f::VectNode)
 			y.derivative .+= -node.derivative * 1
 
 
-		elseif node.op ==:*
-
+		elseif node.op == :*
 			x, y = node.args
-			if isa(x.value, Number) && isa(y.value, Number) ## scaler * scaler 
-				x.derivative += node.derivative * y.value
-				y.derivative += node.derivative * x.value
+			xv, yv = x.value, y.value
+			# grad may be a 0-d array or scalar; extract scalar if needed
 			
-			elseif isa(x.value, AbstractArray) && isa(y.value, AbstractArray)
-				## Some times node.derivative is a scaler which cannot be multipled directly 	
-				
-				## Here the derivative was represented not as scaler but zero dim (0 dim) array 
-				## if 0d * vector throws error multiplied by scaler or vector not allowed in Julia
+			println("shape of grad_ in before  extractions ", size( node.derivative))
 
-				grad = ndims(node.derivative) == 0 ? node.derivative[] : node.derivative
+			grad = node.derivative
 
-				if ndims(x.value) == 1 && ndims(y.value) == 1
-					x.derivative .+= grad * y.value  ## vec * vector  alos scaler to vector 
-					y.derivative .+= x.value * grad
+			println("shape of grad_ in after extractions ", size(grad))
+			# scalar * scalar -> scalar
+			if isa(xv, Number) && isa(yv, Number)
+				x.derivative += grad * yv
+				y.derivative += grad * xv
 
-				elseif ndims(x.value) == 2            ## matrix * matrix 
-					 x.derivative .+= grad * y.value'	## this will work if grad is (m,n) (n,p) = m,p  bca multplication requires compatibles shapes
-        			y.derivative .+= x.value' * grad
-				else
-					x.derivative .+= grad * y.value'  ##  for higher dims  > 2 v v
-					y.derivative .+= x.value' * grad
-				end
-			else 
-				if isa(x.value, AbstractArray)
-					# x is arry, y is also scaler if both are vector or matrices then * 
-					x.derivative .+= node.derivative .* y.value
-            		y.derivative += sum(node.derivative .* x.value)
-				
-				end
-				 # Mixed: x array, y scalar
-				x.derivative .+= node.derivative .* y.value ## vector * scaler 
-				y.derivative .+= node.derivative .* x.value
-			end 
-			
+			# vector (n) dot vector (n) -> scalar: xv' * yv
+			elseif isa(xv, AbstractVector) && isa(yv, AbstractVector) && ndims(xv) == 1 && ndims(yv) == 1
+				# node.value is scalar; grad is scalar
+				x.derivative .+= grad * yv       # scalar * vector
+				y.derivative .+= grad * xv
+
+			# matrix * matrix (or matrix * vector) -> general matrix multiplication
+			elseif isa(xv, AbstractArray) && isa(yv, AbstractArray)
+				# node.value shape is (m,p) when xv is (m,n) and yv is (n,p)
+				# ∂L/∂x = grad * yv'   (grad has shape (m,p))
+				# ∂L/∂y = xv' * grad
+				x.derivative .+= grad * permutedims(yv)  # yv'  (works for 2D)
+				y.derivative .+= permutedims(xv) * grad  # xv'
+
+			# mixed: x is array, y is scalar
+			elseif isa(xv, AbstractArray) && isa(yv, Number)
+				x.derivative .+= node.derivative .* yv
+				# y gets sum over elementwise product
+				y.derivative += sum(node.derivative .* xv)
+
+			# mixed: x scalar, y array
+			elseif isa(xv, Number) && isa(yv, AbstractArray)
+				# x gets sum over elementwise product
+				x.derivative += sum(node.derivative .* yv)
+				y.derivative .+= node.derivative .* xv
+
+			else
+				error("Unhandled * case with types: $(typeof(xv)), $(typeof(yv))")
+			end
+
+		 #--------------------------
 		elseif node.op ==:/
 			## two case L = x/y
 			## if L is differentieted wrt x = 1/Y
@@ -368,14 +305,23 @@ function backward!(f::VectNode)
 			arg = node.args[1]
 			arg.derivative .+= node.derivative ./ arg.value
 	
-		elseif node.op ==:relu
-			#arg = node.args[1]
+		elseif node.op == :relu
+			arg = node.args[1]
 
 			## Apply relu function
-			#relu_grad = (arg.value .> 0) 
-			#arg.derivative .+= node.derivative .* relu_grad
-			backward_relu!(node)
-
+			relu_grad = (arg.value .> 0) 
+			
+			## -- Debug Prints ----
+			println("node.value shape :" , size(node.value))
+			println("node.value sample:", node.value[1:min(end, 5), 1:min(end, 5)])
+			
+			println("arg.derivate shape before update", size(arg.derivative))
+			println("node.derivative shape: ", size(node.derivative))
+			println("relu_grad shape", size(relu_grad))
+			println("relu_grad sample", relu_grad[1:min(end, 5), 1:min(end, 5)])
+			
+			arg.derivative .+= node.derivative .* relu_grad
+		
 		elseif node.op ==:exp
 			arg = node.args[1]
 			arg.derivative .+=  node.derivative * node.value
