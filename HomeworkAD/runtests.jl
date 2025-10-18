@@ -15,7 +15,9 @@ run_gradient_tests(Forward.gradient, VectReverse.gradient)
 
 
 
+
+
 ## Second order
 # We only test `hessian` and not `hvp` but if `hessian` is implemented
 # by reusing `hvp`, this is testing both at the same time.
-#run_gradient_tests(Forward.hessian, VectReverse.hessian, hessian = true)
+run_gradient_tests(Forward.hessian, VectReverse.hessian, hessian = true)
