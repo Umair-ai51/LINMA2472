@@ -11,6 +11,7 @@ Base.broadcastable(d::Dual) = Ref(d)
 Base.zero(::Dual) = Dual(0, 0)
 Base.zero(::Type{Dual}) = Dual(0, 0)
 Base.one(::Dual) = Dual(1, 0)
+
 # Addition and subtraction
 Base.:+(x::Dual, y::Dual) = Dual(x.value + y.value, x.derivative + y.derivative)
 Base.:+(x::Dual, y::Number) = Dual(x.value + y, x.derivative)

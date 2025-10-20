@@ -11,6 +11,7 @@ Node(op, args, value, localjac) = Node(op, args, value, localjac, 0.0)
 Node(value) = Node(nothing, Node[], value, Float64[])
 Base.zero(::Node) = Node(0)
 Base.:*(x::Node, y::Node) = Node(:*, [x, y], x.value * y.value, [y.value, x.value])
+
 Base.:*(x::Node, y::Number) = Node(:*, [x], x.value * y, [y])
 Base.:*(x::Number, y::Node) = Node(:*, [y], x * y.value, [x])
 Base.:+(x::Node, y::Node) = Node(:+, [x, y], x.value + y.value, [1.0, 1.0])

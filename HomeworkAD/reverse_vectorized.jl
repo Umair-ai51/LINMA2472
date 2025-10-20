@@ -1,145 +1,128 @@
-module VectReverse
+module ForwardOverReverse
 
-# Export key public functions
-export gradient, hvp, hessian
+import ..Flatten
 
-# Import dependencies
-import ..Flatten                       # Utility to flatten inputs for differentiation
-import Base: tanh                      # Extend Base.tanh
-import ..Forward: Dual                 # Dual numbers from forward mode AD
-import ..Forward: hessian as fwd_hessian  # Forward-mode Hessian implementation
-
-
-# ==========================================================
-# ===  COMPUTATIONAL GRAPH NODE STRUCTURE (VectNode)     ===
-# ==========================================================
-
-# Each VectNode represents one node in a computation graph.
-# It holds the operation, its arguments, the computed value,
-# and a place to store the derivative (for backpropagation).
+# -----------------------
+# VectNode definition
+# -----------------------
 mutable struct VectNode
-    op::Union{Nothing,Symbol}   # Operation type (:+, :*, :tanh, etc.)
-    args::Vector{Any}           # Arguments (can be VectNode or constants)
-    value::Any                  # Computed value of this node
-    derivative::Any             # Gradient/derivative accumulator
+    op::Union{Nothing, Symbol}
+    args::Vector{VectNode}
+    value::Any
+    derivative::Any
+    tangent::Any
 end
 
-# Constructor for nodes with an operation and value
-function VectNode(op, args, value)
-    # Initialize derivative (0 for scalars, zeros array for tensors)
+# Constructors
+VectNode(x::Number) = VectNode(nothing, VectNode[], x, zero(x), zero(x))
+VectNode(x::AbstractArray) = VectNode(nothing, VectNode[], x, zeros(size(x)), zeros(size(x)))
+
+# Utility to create a VectNode with given op
+function VectNode(op, args::Vector{VectNode}, value)
     derivative = isa(value, Number) ? zero(value) : zeros(size(value))
-    VectNode(op, args, value, derivative)
+    tangent = isa(value, Number) ? zero(value) : zeros(size(value))
+    return VectNode(op, args, value, derivative, tangent)
 end
 
-# Constructors for leaf nodes (inputs)
-VectNode(value::Number)        = VectNode(nothing, Any[], value, zero(value))
-VectNode(value::AbstractArray) = VectNode(nothing, Any[], value, zeros(size(value)))
+#-------------------------------
+Base.length(x::VectNode) = length(x.value)
+Base.size(x::VectNode) = size(x.value)  
+Base.size(x::VectNode, dim) = size(x.value, dim)
+Base.eltype(x::VectNode) = eltype(x.value)
+Base.ndims(x::VectNode) = ndims(x.value)
+Base.iterate(x::VectNode) = iterate(x.value)
+Base.iterate(x::VectNode, state) = iterate(x.value, state)
+Base.Broadcast.broadcastable(x::VectNode) = x
 
+# -----------------------
+# Broadcasting Support
+# -----------------------
 
-# ==========================================================
-# ===  OPERATOR OVERLOADING FOR GRAPH BUILDING            ===
-# ==========================================================
-
-# Overload broadcasted operators to work on VectNodes.
-# This allows elementwise operations like tanh.(x), x .* y, etc.
-
+# For unary broadcasted operations like `tanh.(X)`
 function Base.broadcasted(op::Function, x::VectNode)
-    result_val = broadcast(op, x.value)
-    return VectNode(Symbol(op), Any[x], result_val)
+    result_val = op.(x.value)
+    return VectNode(Symbol(op), [x], result_val)
 end
 
+# For binary broadcasted operations `X .* Y` (both VectNode)
 function Base.broadcasted(op::Function, x::VectNode, y::VectNode)
-    result_val = broadcast(op, x.value, y.value)
-    tag = (op === (*)) ? :hadamard : Symbol(op)  # mark hadamard product separately
-    return VectNode(tag, Any[x, y], result_val)
+    result = broadcast(op, x.value, y.value)
+    return VectNode(Symbol(op), [x, y], result)
 end
 
-function Base.broadcasted(op::Function, x::VectNode, y::Union{AbstractArray,Number})
-    result_val = broadcast(op, x.value, y)
-    tag = (op === (*)) ? :hadamard : Symbol(op)
-    return VectNode(tag, Any[x, y], result_val)
+# For `X .* Y` where Y is a constant
+function Base.broadcasted(op::Function, x::VectNode, y::Union{AbstractArray, Number})
+    result = broadcast(op, x.value, y)
+    return VectNode(Symbol(op), [x, VectNode(y)], result)
 end
 
-function Base.broadcasted(op::Function, x::Union{AbstractArray,Number}, y::VectNode)
-    result_val = broadcast(op, x, y.value)
-    tag = (op === (*)) ? :hadamard : Symbol(op)
-    return VectNode(tag, Any[x, y], result_val)
+# For `X .* Y` where X is a constant
+function Base.broadcasted(op::Function, x::Union{AbstractArray, Number}, y::VectNode)
+    result = broadcast(op, x, y.value)
+    return VectNode(Symbol(op), [VectNode(x), y], result)
 end
 
-# Power operation for constant exponent
-function Base.broadcasted(::typeof(Base.literal_pow), ::typeof(^), x::VectNode, ::Val{p}) where {p}
-    result_val = x.value .^ p
-    return VectNode(:^, Any[x, p], result_val)
+# For `x .^ 2` (literal power)
+function Base.broadcasted(::typeof(Base.literal_pow), ::typeof(^), x::VectNode, ::Val{y}) where {y}
+    result = x.value .^ y
+    return VectNode(:^, [x], result)
 end
 
+# -----------------------
+# Operator Overloads
+# -----------------------
 
-# ==========================================================
-# ===  BASIC ARITHMETIC OPERATORS (+, -, *, /, ^)         ===
-# ==========================================================
+# Addition
+Base.:+(x::VectNode, y::VectNode) = VectNode(:+, [x, y], x.value + y.value)
+Base.:+(x::VectNode, y::Number) = VectNode(:+, [x, VectNode(y)], x.value + y)
+Base.:+(x::Number, y::VectNode) = VectNode(:+, [VectNode(x), y], x + y.value)
+Base.:+(x::VectNode, y::AbstractArray) = VectNode(:+, [x, VectNode(y)], x.value .+ y)
+Base.:+(x::AbstractArray, y::VectNode) = VectNode(:+, [VectNode(x), y], x .+ y.value)
 
-# Addition and subtraction between nodes and numbers/arrays
-Base.:+(x::VectNode, y::VectNode)      = VectNode(:+, Any[x, y], x.value + y.value)
-Base.:+(x::VectNode, y::Number)        = VectNode(:+, Any[x, y], x.value .+ y)
-Base.:+(x::Number, y::VectNode)        = VectNode(:+, Any[x, y], x .+ y.value)
-Base.:+(x::VectNode, y::AbstractArray) = VectNode(:+, Any[x, VectNode(y)], x.value .+ y)
-Base.:+(x::AbstractArray, y::VectNode) = VectNode(:+, Any[VectNode(x), y], x .+ y.value)
+# Subtraction
+Base.:-(x::VectNode, y::VectNode) = VectNode(:-, [x, y], x.value - y.value)
+Base.:-(x::VectNode, y::Number) = VectNode(:-, [x, VectNode(y)], x.value - y)
+Base.:-(x::Number, y::VectNode) = VectNode(:-, [VectNode(x), y], x - y.value)
+Base.:-(x::VectNode, y::AbstractArray) = VectNode(:-, [x, VectNode(y)], x.value .- y)
+Base.:-(x::AbstractArray, y::VectNode) = VectNode(:-, [VectNode(x), y], x .- y.value)
 
-Base.:-(x::VectNode, y::VectNode)      = VectNode(:-, Any[x, y], x.value - y.value)
-Base.:-(x::VectNode, y::Number)        = VectNode(:-, Any[x, y], x.value .- y)
-Base.:-(x::Number, y::VectNode)        = VectNode(:-, Any[x, y], x .- y.value)
-Base.:-(x::VectNode, y::AbstractArray) = VectNode(:-, Any[x, VectNode(y)], x.value .- y)
-Base.:-(x::AbstractArray, y::VectNode) = VectNode(:-, Any[VectNode(x), y], x .- y.value)
-
-# Multiplication — handles scalar, vector, and matrix cases
+# Multiplication
 Base.:*(x::VectNode, y::VectNode) = begin
     xv, yv = x.value, y.value
-    result = if isa(xv, AbstractVector) && isa(yv, AbstractVector) && ndims(xv) == 1 && ndims(yv) == 1
+    val = if isa(xv, AbstractVector) && isa(yv, AbstractVector)
         xv' * yv  # dot product
     else
-        xv * yv   # standard matrix or scalar multiplication
+        xv * yv
     end
-    VectNode(:*, Any[x, y], result)
+    VectNode(:*, [x, y], val)
 end
-Base.:*(x::VectNode, y::Number)        = VectNode(:*, Any[x, y], x.value * y)
-Base.:*(x::Number, y::VectNode)        = VectNode(:*, Any[x, y], x * y.value)
-Base.:*(x::AbstractArray, y::VectNode) = VectNode(:*, Any[VectNode(x), y], x * y.value)
-Base.:*(x::VectNode, y::AbstractArray) = VectNode(:*, Any[x, VectNode(y)], x.value * y)
+Base.:*(x::VectNode, y::Number) = VectNode(:*, [x, VectNode(y)], x.value * y)
+Base.:*(x::Number, y::VectNode) = VectNode(:*, [VectNode(x), y], x * y.value)
+Base.:*(x::VectNode, y::AbstractArray) = VectNode(:*, [x, VectNode(y)], x.value * y)
+Base.:*(x::AbstractArray, y::VectNode) = VectNode(:*, [VectNode(x), y], x * y.value)
 
 # Division
-Base.:/(x::VectNode, y::VectNode)      = VectNode(:/, Any[x, y], x.value / y.value)
-Base.:/(x::VectNode, y::Number)        = VectNode(:/, Any[x, VectNode(y)], x.value / y)
-Base.:/(x::Number, y::VectNode)        = VectNode(:/, Any[VectNode(x), y], x / y.value)
+Base.:/(x::VectNode, y::VectNode) = VectNode(:/, [x, y], x.value / y.value)
+Base.:/(x::VectNode, y::Number) = VectNode(:/, [x, VectNode(y)], x.value / y)
+Base.:/(x::Number, y::VectNode) = VectNode(:/, [VectNode(x), y], x / y.value)
 
-# Integer power
-Base.:^(x::VectNode, n::Integer)       = Base.power_by_squaring(x, n)
+# Power (only integer powers)
+Base.:^(x::VectNode, n::Integer) = VectNode(:^, [x], x.value^n)
 
+# Unary functions
+Base.tanh(x::VectNode) = VectNode(:tanh, [x], tanh.(x.value))
+Base.exp(x::VectNode) = VectNode(:exp, [x], exp.(x.value))
+Base.log(x::VectNode) = VectNode(:log, [x], log.(x.value))
+Base.sum(x::VectNode) = VectNode(:sum, [x], sum(x.value))
 
-# ==========================================================
-# ===  NONLINEAR FUNCTIONS (ACTIVATIONS, LOG, EXP, SUM)   ===
-# ==========================================================
-
-# Elementwise ReLU and tanh
-relu(x::VectNode) = VectNode(:relu, Any[x], max.(0, x.value))
-tanh(x::VectNode) = VectNode(:tanh, Any[x], tanh.(x.value))
-
-# Extend tanh for Dual (forward-mode differentiation)
-function tanh(x::Dual)
-    t = tanh(x.value)
-    Dual(t, (1 - t) * (1 + t) * x.derivative)
+# ReLU activation
+function relu(x::VectNode)
+    return VectNode(:relu, [x], max.(0, x.value))
 end
 
-# Other elementwise functions
-Base.exp(x::VectNode) = VectNode(:exp, Any[x], exp.(x.value))
-Base.log(x::VectNode) = VectNode(:log, Any[x], log.(x.value))
-Base.sum(x::VectNode) = VectNode(:sum, Any[x], sum(x.value))
-
-
-# ==========================================================
-# ===  GRAPH UTILITIES                                    ===
-# ==========================================================
-
-# Topological sort (depth-first search)
-# Ensures we process nodes from inputs to outputs in order.
+# -----------------------
+# Topological Sort
+# -----------------------
 function topo_sort(f::VectNode)
     visited = Set{VectNode}()
     order = VectNode[]
@@ -147,188 +130,314 @@ function topo_sort(f::VectNode)
         if n ∉ visited
             push!(visited, n)
             for a in n.args
-                isa(a, VectNode) && dfs(a)
+                if isa(a, VectNode)
+                    dfs(a)
+                end
             end
             push!(order, n)
         end
     end
     dfs(f)
-    order
+    return order
 end
 
-# Reset all derivatives to zero before backpropagation
-function clear_derivatives!(nodes::Vector{VectNode})
-    for n in nodes
-        if isa(n.derivative, Number)
-            n.derivative = zero(n.derivative)
-        else
-            n.derivative .= 0
-        end
-    end
-end
-
-
-# ==========================================================
-# ===  REVERSE-MODE BACKPROPAGATION IMPLEMENTATION        ===
-# ==========================================================
-
+# -----------------------
+# Reverse-mode backward
+# -----------------------
 function backward!(f::VectNode)
-    # 1️⃣ Sort nodes topologically
-    nodes = topo_sort(f)
-
-    # 2️⃣ Clear old derivatives
-    clear_derivatives!(nodes)
-
-    # 3️⃣ Initialize derivative of output to 1 (df/df = 1)
-    f.derivative = isa(f.value, Number) ? one(f.value) : ones(size(f.value))
-
-    # 4️⃣ Propagate gradients backward
-    for node in Iterators.reverse(nodes)
-        isnothing(node.op) && continue
-        grad = node.derivative
-
-        # --- Operation-specific gradient rules ---
-        if node.op == :+
-            # d(x + y) = dx + dy
+    sorted_nodes = topo_sort(f)
+    f.derivative = 1.0
+    for node in reverse(sorted_nodes)
+        if isnothing(node.op)
+            continue
+        elseif node.op == :+
             for a in node.args
-                isa(a, VectNode) && (a.derivative .+= grad)
+                a.derivative .+= node.derivative
             end
-
         elseif node.op == :-
-            # d(x - y) = dx - dy
             x, y = node.args
-            isa(x, VectNode) && (x.derivative .+= grad)
-            isa(y, VectNode) && (y.derivative .-= grad)
-
-        elseif node.op == :hadamard
-            # Elementwise multiplication
-            x, y = node.args
-            xv = isa(x, VectNode) ? x.value : x
-            yv = isa(y, VectNode) ? y.value : y
-            isa(x, VectNode) && (x.derivative .+= grad .* yv)
-            isa(y, VectNode) && (y.derivative .+= grad .* xv)
-
+            x.derivative .+= node.derivative
+            y.derivative .+= -node.derivative
         elseif node.op == :*
-            # Matrix / vector / scalar multiplication
             x, y = node.args
-            xv = isa(x, VectNode) ? x.value : x
-            yv = isa(y, VectNode) ? y.value : y
-
+            xv, yv = x.value, y.value
+            grad = node.derivative
+            
             if isa(xv, Number) && isa(yv, Number)
-                isa(x, VectNode) && (x.derivative += grad * yv)
-                isa(y, VectNode) && (y.derivative += grad * xv)
-
-            elseif isa(xv, AbstractVector) && isa(yv, AbstractVector)
-                isa(x, VectNode) && (x.derivative .+= grad .* yv)
-                isa(y, VectNode) && (y.derivative .+= grad .* xv)
+                x.derivative += grad * yv
+                y.derivative += grad * xv
 
             elseif isa(xv, AbstractArray) && isa(yv, AbstractArray)
-                isa(x, VectNode) && (x.derivative .+= grad * yv')
-                isa(y, VectNode) && (y.derivative .+= xv' * grad)
+                x.derivative .+= grad * yv'
+                y.derivative .+= xv' * grad
 
-            elseif isa(xv, AbstractArray) && isa(yv, Number)
-                isa(x, VectNode) && (x.derivative .+= grad .* yv)
-                isa(y, VectNode) && (y.derivative += sum(grad .* xv))
+            #= elseif isa(xv, AbstractArray) && isa(yv, Number)
+                x.derivative .+= grad .* yv
+                y.derivative += sum(grad .* xv)
 
             elseif isa(xv, Number) && isa(yv, AbstractArray)
-                isa(x, VectNode) && (x.derivative += sum(grad .* yv))
-                isa(y, VectNode) && (y.derivative .+= grad .* xv)
-
+                x.derivative += sum(grad .* yv)
+                y.derivative .+= grad .* xv
+             =#
             else
                 error("Unhandled * case with types: $(typeof(xv)), $(typeof(yv))")
             end
-
         elseif node.op == :/
-            # Quotient rule
             x, y = node.args
-            xv = isa(x, VectNode) ? x.value : x
-            yv = isa(y, VectNode) ? y.value : y
-            isa(x, VectNode) && (x.derivative .+= grad ./ yv)
-            isa(y, VectNode) && (y.derivative .-= grad .* xv ./ (yv .^ 2))
+            xv, yv = x.value, y.value
+            grad = node.derivative
+            
+            if isa(xv, Number) && isa(yv, Number)
+                x.derivative += grad / yv
+                y.derivative += grad * (-xv / yv^2)
+            else
+                x.derivative .+= grad ./ yv
+                y.derivative .+= grad .* (-xv ./ yv.^2)
+            end
+        elseif node.op == :tanh
+            arg = node.args[1]
+            arg.derivative .+= node.derivative .* (1 .- node.value.^2)
 
         elseif node.op == :^
-            # Power rule
-            arg, n = node.args
-            upd = grad .* (n .* (arg.value .^ (n - 1)))
-            arg.derivative .+= upd
-
-        elseif node.op == :tanh
-            # d(tanh(x)) = 1 - tanh^2(x)
             arg = node.args[1]
-            upd = grad .* ((1 .- node.value) .* (1 .+ node.value))
-            arg.derivative .+= upd
-
-        elseif node.op == :relu
-            # d(ReLU(x)) = 1 if x>=0 else 0
-            arg = node.args[1]
-            upd = grad .* float.(arg.value .>= 0)
-            arg.derivative .+= upd
+            n = 2
+            if isa(arg.value, AbstractArray)
+                arg.derivative .+= node.derivative .* (n .* arg.value.^(n-1))
+            else
+                arg.derivative += node.derivative * (n * arg.value^(n-1))
+            end
 
         elseif node.op == :exp
             arg = node.args[1]
-            arg.derivative .+= grad .* node.value
+            arg.derivative .+= node.derivative .* node.value
 
         elseif node.op == :log
             arg = node.args[1]
-            arg.derivative .+= grad ./ arg.value
+            arg.derivative .+= node.derivative ./ arg.value
+        elseif node.op == :relu
+            arg = node.args[1]
+            relu_grad = float.(arg.value .>= 0)
+
+            arg.derivative .+= node.derivative .* relu_grad
+        elseif node.op == :sum
+            arg = node.args[1]
+            arg.derivative .+= node.derivative
+        else
+            error("Op $(node.op) not implemented in backward!")
+        end
+    end
+end
+
+
+# -----------------------
+# Forward pass for tangent (Hessian-vector product)
+# -----------------------
+# -----------------------
+# Forward pass for tangent (Hessian-vector product) - FIXED
+# -----------------------
+# -----------------------
+# Forward pass for tangent (Hessian-vector product) - FIXED
+# -----------------------
+# -----------------------
+# Forward pass for tangent (Hessian-vector product)
+# -----------------------
+# Add these essential methods FIRST
+
+function forward_tangent!(f::VectNode)
+    sorted_nodes = topo_sort(f)
+    
+    for node in sorted_nodes
+        if isnothing(node.op)
+            continue
+
+        elseif node.op == :+
+            node.tangent = zero(node.value)
+            for a in node.args
+                # Handle both scalar and array addition
+                if isa(node.tangent, Number) && isa(a.tangent, Number)
+                    node.tangent += a.tangent
+                else
+                    node.tangent = node.tangent .+ a.tangent
+                end
+            end
+
+        elseif node.op == :-
+            if length(node.args) == 2
+                x, y = node.args
+                node.tangent = x.tangent - y.tangent
+            else
+                # Handle unary minus if it occurs
+                x = node.args[1]
+                node.tangent = -x.tangent
+            end
+
+        elseif node.op == :*
+            x, y = node.args
+            xv, yv = x.value, y.value
+            xt, yt = x.tangent, y.tangent
+
+            # Match ALL the cases from your reverse pass
+            if isa(xv, Number) && isa(yv, Number)
+                node.tangent = xt * yv + xv * yt
+            elseif isa(xv, AbstractArray) && isa(yv, AbstractArray)
+                # Handle both matrix multiplication and element-wise
+                try
+                    node.tangent = xt * yv + xv * yt
+                catch
+                    # Fallback to element-wise
+                    node.tangent = xt .* yv .+ xv .* yt
+                end
+            elseif isa(xv, AbstractArray) && isa(yv, Number)
+                node.tangent = xt .* yv .+ xv .* yt
+            elseif isa(xv, Number) && isa(yv, AbstractArray)
+                node.tangent = xt .* yv .+ xv .* yt
+            else
+                error("Unhandled * case: $(typeof(xv)), $(typeof(yv))")
+            end
+
+        elseif node.op == :/
+            x, y = node.args
+            xv, yv = x.value, y.value
+            xt, yt = x.tangent, y.tangent
+
+            if isa(xv, Number) && isa(yv, Number)
+                node.tangent = (xt * yv - xv * yt) / (yv^2)
+            else
+                node.tangent = (xt .* yv .- xv .* yt) ./ (yv .^ 2)
+            end
+
+        elseif node.op == :^
+            # Handle both single arg (n=2) and two arg cases
+            if length(node.args) == 1
+                arg = node.args[1]
+                n = 2
+                xv = arg.value
+                xt = arg.tangent
+            else
+                x, n_node = node.args
+                n = n_node.value
+                xv = x.value
+                xt = x.tangent
+            end
+            
+            if isa(xv, AbstractArray)
+                node.tangent = n .* (xv .^(n-1)) .* xt
+            else
+                node.tangent = n * xv^(n-1) * xt
+            end
+
+        elseif node.op == :tanh
+            arg = node.args[1]
+            node.tangent = (1 .- node.value.^2) .* arg.tangent
+
+        elseif node.op == :exp
+            arg = node.args[1]
+            node.tangent = node.value .* arg.tangent
+
+        elseif node.op == :log
+            arg = node.args[1]
+            node.tangent = arg.tangent ./ arg.value
+
+        elseif node.op == :relu
+            arg = node.args[1]
+            relu_grad = float.(arg.value .>= 0)
+            node.tangent = relu_grad .* arg.tangent
 
         elseif node.op == :sum
             arg = node.args[1]
-            arg.derivative .+= grad
+            node.tangent = sum(arg.tangent)
 
         else
-            error("Operation `$(node.op)` not supported in backward pass yet")
+            error("Op $(node.op) not implemented in forward_tangent!")
         end
     end
-
-    return f
 end
-
-
-# ==========================================================
-# ===  GRADIENT COMPUTATION API                          ===
-# ==========================================================
-
-# Computes gradient of f(x) with respect to x
+# -----------------------
+# Compute gradient
+# -----------------------
+# Replace your gradient functions with this:
 function gradient!(f, g::Flatten, x::Flatten)
-    # Wrap input components as differentiable VectNodes
-    xnodes = Flatten(VectNode.(x.components))
-
-    # Evaluate function with graph-building
-    expr = f(xnodes)
-
-    # Run reverse-mode backpropagation
+    x_nodes = Flatten(VectNode.(x.components))
+    expr = f(x_nodes)
     backward!(expr)
-
-    # Extract derivatives into g
-    @inbounds for i in eachindex(x.components)
-        g.components[i] .= xnodes.components[i].derivative
+    for i in eachindex(x.components)
+        g.components[i] .= x_nodes.components[i].derivative
     end
-    g
+    return g
 end
 
-# Convenience wrapper (allocates new gradient)
-gradient(f, x) = gradient!(f, zero(x), x)
 
-
-# ==========================================================
-# ===  HESSIAN AND HESSIAN-VECTOR PRODUCT (SECOND ORDER) ===
-# ==========================================================
-
-# HVPExecutor structure wraps f and x for vectorized Hessian computation
-struct HVPExecutor
-    f::Function
-    x::Flatten
+function gradient(f::Function, x::Flatten)
+    g = zero(x)
+    return gradient!(f, g, x)
 end
 
-# Compute flattened Hessian using forward-mode Hessian
-function Base.vec(op::HVPExecutor)
-    H = fwd_hessian(op.f, op.x)
-    return vec(H)
+
+# -----------------------
+# Compute full Hessian
+# -----------------------
+
+function Hv(f::Function, x::Flatten, v::Vector)
+    # Create FRESH VectNodes for this computation
+    x_nodes = [VectNode(xi) for xi in x.components]
+    x_flat = Flatten(x_nodes)
+    
+    # Compute function and backward pass
+    expr = f(x_flat)
+    
+    # Reset ALL derivatives in the entire graph before backward pass
+    all_nodes = topo_sort(expr)
+    for node in all_nodes
+        node.derivative = zero(node.value)
+    end
+    
+    # Perform backward pass
+    backward!(expr)
+    
+    # Reset ALL tangents in the entire graph
+    for node in all_nodes
+        node.tangent = zero(node.value)
+    end
+    
+    # Seed direction in input nodes only
+    offset = 0
+    for node in x_nodes
+        n = length(node.value)
+        tangent_val = reshape(v[offset+1:offset+n], size(node.value))
+        node.tangent = tangent_val
+        offset += n
+    end
+    
+    # Forward pass (Hv product)
+    forward_tangent!(expr)
+    
+    # Collect tangents from input nodes
+    return [node.tangent for node in x_nodes]
 end
 
-# Interface functions
-hvp(f, x::Flatten) = HVPExecutor(f, x)
-const hessian = hvp  # Alias (same functionality)
+function flatten_tangent(tangents::Vector)
+    v = Float64[]
+    for t in tangents
+        append!(v, vec(t))
+    end
+    return v
+end
 
-end # module
+function hessian(f::Function, x::Flatten)
+    total_len = sum(length.(x.components))
+    H = zeros(total_len, total_len)
+    for j in 1:total_len
+        v = zeros(total_len)
+        v[j] = 1.0
+        Hv_col = Hv(f, x, v)
+        Hv_vec = flatten_tangent(Hv_col)
+        H[:, j] .= Hv_vec
+    end
+    return H
+end
+
+function hessian!(f::Function, x::Flatten)
+    return hessian(f, x)  # This will call your existing hessian function
+end
+
+end
