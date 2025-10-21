@@ -376,68 +376,62 @@ end
 # -----------------------
 # Compute full Hessian
 # -----------------------
+# Replace your entire Hessian computation with this:
 
-function Hv(f::Function, x::Flatten, v::Vector)
-    # Create FRESH VectNodes for this computation
+function pushforward(f::Function, x::Flatten, tx::Vector)
+    # Convert inputs to VectNodes with tangents
     x_nodes = [VectNode(xi) for xi in x.components]
-    x_flat = Flatten(x_nodes)
     
-    # Compute function and backward pass
-    expr = f(x_flat)
-    
-    # Reset ALL derivatives in the entire graph before backward pass
-    all_nodes = topo_sort(expr)
-    for node in all_nodes
-        node.derivative = zero(node.value)
-    end
-    
-    # Perform backward pass
-    backward!(expr)
-    
-    # Reset ALL tangents in the entire graph
-    for node in all_nodes
-        node.tangent = zero(node.value)
-    end
-    
-    # Seed direction in input nodes only
+    # Seed tangents with direction tx
     offset = 0
     for node in x_nodes
         n = length(node.value)
-        tangent_val = reshape(v[offset+1:offset+n], size(node.value))
-        node.tangent = tangent_val
+        node.tangent = reshape(tx[offset+1:offset+n], size(node.value))
         offset += n
     end
     
-    # Forward pass (Hv product)
-    forward_tangent!(expr)
+    x_flat = Flatten(x_nodes)
     
-    # Collect tangents from input nodes
-    return [node.tangent for node in x_nodes]
+    # Compute function with forward pass
+    result = f(x_flat)
+    forward_tangent!(result)
+    
+    # Return tangents of output
+    if isa(result, VectNode)
+        return [result.tangent]
+    else
+        return [node.tangent for node in result.components]
+    end
 end
 
-function flatten_tangent(tangents::Vector)
-    v = Float64[]
-    for t in tangents
-        append!(v, vec(t))
+function jacobian(f::Function, x::Flatten)
+    total_input_len = sum(length.(x.components))
+    total_output_len = sum(length.(f(x).components))
+    
+    J = zeros(total_output_len, total_input_len)
+    
+    for j in 1:total_input_len
+        # Create one-hot direction vector
+        v = zeros(total_input_len)
+        v[j] = 1.0
+        
+        # Compute jacobian column
+        J_col = pushforward(f, x, v)
+        J_col_vec = flatten_tangent(J_col)
+        J[:, j] .= J_col_vec
     end
-    return v
+    
+    return J
 end
 
 function hessian(f::Function, x::Flatten)
-    total_len = sum(length.(x.components))
-    H = zeros(total_len, total_len)
-    for j in 1:total_len
-        v = zeros(total_len)
-        v[j] = 1.0
-        Hv_col = Hv(f, x, v)
-        Hv_vec = flatten_tangent(Hv_col)
-        H[:, j] .= Hv_vec
-    end
-    return H
+    # This matches the reference exactly: jacobian(z -> gradient(f, z), x)
+    return jacobian(z -> gradient(f, z), x)
 end
 
-function hessian!(f::Function, x::Flatten)
-    return hessian(f, x)  # This will call your existing hessian function
+# Hessian-vector product
+function hvp(f::Function, x::Flatten, v::Vector)
+    return pushforward(z -> gradient(f, z), x, v)
 end
 
 end
