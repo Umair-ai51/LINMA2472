@@ -31,45 +31,77 @@ mutable struct trnsf_Node
     args::Vector{trnsf_Node}
     value::Any
     derivative::Any
+    meta::Any
 
 end
 
 ## define constructors for operations
-trnsf_Node(op,args, value) = trnsf_Node(op, args, value, zeros(size(value)))
+trnsf_Node(op,args, value) = trnsf_Node(op, args, value, zeros(size(value)),  Dict(:shape => size(value)))
 
 ## constructore for the leaf nodes 
-trnsf_Node(x::AbstractArray) = trnsf_Node(nothing, trnsf_Node[], x, zeros(size(x)))
+trnsf_Node(x::AbstractArray) = trnsf_Node(nothing, trnsf_Node[], x, zeros(size(x)) ,Dict(:shape => size(x)))
 
 ## constructor for leaf node
-trnsf_Node(x::Number) = trnsf_Node(nothing, trnsf_Node[], x, zeros(size(x)))
+trnsf_Node(x::Number) = trnsf_Node(nothing, trnsf_Node[], x, zeros(size(x)),  Dict(:shape => (1,)))
 
 
 Base.:*(x::AbstractArray, y::AbstractArray) = trnsf_Node(:*, [trnsf_Node(x), trnsf_Node(y)], x * y)
+Base.:*(x::Number, y::AbstractArray) = trnsf_Node(:*, [trnsf_Node(x), trnsf_Node(y)], x .* y )
+Base.:*(x::trnsf_Node, y::trnsf_Node) = trnsf_Node(:*, [x, y], x.value * y.value)
 
 Base.:*(x::Number, y::AbstractArray) = trnsf_Node(:*, [trnsf_Node(x), trnsf_Node(y)], x .* y )
 
-Base.:*(x::trnsf_Node, y::trnsf_Node) = trnsf_Node(:*, [x, y], x.value * y.value)
-
 
 Base.:+(x::AbstractArray, y::AbstractArray) = trnsf_Node(:+, [trnsf_Node(x), trnsf_Node(y)], x + y)
-
 Base.:+(x::AbstractArray, y::trnsf_Node) = trnsf_Node(:+, [trnsf_Node(x), y], x + y.value)
+Base.:+(x::trnsf_Node, y::trnsf_Node) = trnsf_Node(:+, [x, y], x.value + y.value)
+Base.:+(x::trnsf_Node, y::AbstractVector) = trnsf_Node(:+, [x, trnsf_Node(y)], x.value .+ y)
+
+
+Base.:-(x::trnsf_Node, y::AbstractArray) = trnsf_Node(:-, [x, trnsf_Node(y)], x.value .- y)
 
 ## Overloading the adjoint 
 Base.:adjoint(x::trnsf_Node) = trnsf_Node(:adjoint, [x], x.value')
-
 Base.sqrt(x::trnsf_Node)  = trnsf_Node(:sqrt, [x], sqrt.(x.value))
+#Base.maximum(n::trnsf_Node, dims::Int) = maximum(n.value, dims= dims) 
 
 
 Base.:/(x::trnsf_Node, y::Number) = trnsf_Node(:/ , [x, trnsf_Node(y)], x.value ./ y) 
 
-Base.maximum(n::trnsf_Node, dims::Int) = maximum(n.value, dims= dims) 
+relu(x) = max(0, x)
 
+relu(x::trnsf_Node) = trnsf_Node(:relu, [x], relu.(x.value))
+    
 #Base.:transpose(x::trnsf_Node) = trnsf_Node(:transpose, [x], x.value')
 
 ## Overloading the base operator
 Base.size(n::trnsf_Node) = size(n.value)
 Base.size(n::trnsf_Node, dim::Int) = size(n.value, dim)
+Base.length(n::trnsf_Node) = length(n.value)
+
+#Base.getindex(n::trnsf_Node, inds...) = n.value[inds...]
+
+##-------------
+## The Problem We need to overload the index so we could get the index of 
+## last token 
+function Base.getindex(x::trnsf_Node, row_inds::Union{Colon, Int}, col_inds::Union{Colon, Int})
+    # Create a new node representing the indexing
+    new_node = trnsf_Node(:getindex, [x], x.value[row_inds, col_inds])
+    # Store the indices in metadata for backward
+    new_node.meta = Dict(:inds => (row_inds, col_inds))
+    return new_node
+end
+
+##-------------
+function softmax_node(scores::trnsf_Node)
+
+    score_stable = scores.value .- maximum(scores.value, dims=2)
+    exp_scores = exp.(score_stable)
+    softmax_Scores = exp_scores ./ sum(score_stable, dims=2)
+
+    return trnsf_Node(:softmax, [scores], softmax_Scores)
+
+end
 
 ##--------------------------------
 word2id = Dict{String, Int}()
@@ -143,10 +175,12 @@ function attention(Q, K, V)
     ## for single word what is the prob of the next word 10,10
     print("\n Type of ", typeof(scores))
     
-    scores = exp.(scores .- maximum(scores, dims=2))
+    scores = softmax_node(scores)
 
-    scores ./= sum(scores, dims=2)
-    
+    #max_tok =  maximum(scores, dims=2)
+    #scores = exp.(scores .- max_tok)
+    #scores ./= sum(scores, dims=2)
+
     return V * scores 
 
 end
@@ -161,6 +195,7 @@ function multihead_attention(X, num_heads=4)
     print("\n X in att_head", size(X))
 
     d_model = size(X, 1)
+
     print("\n d_model", typeof(d_model))
     print("\n d_model", size(d_model))
 
@@ -185,28 +220,53 @@ function multihead_attention(X, num_heads=4)
         push!(heads, attention(Q,K,V))
     
     end
+
     print("Size of heads",size(heads))
-    return reduce(vcat, heads)
+    X_att = trnsf_Node(:concat, heads, vcat([h.value for h in heads]...))
+
+    return X_att
 end
 
 function feed_forward(X)
-    W1 = 0.01 .* randn(128, size(X, 1))
+    
+    W1 = 0.01 * randn(128, size(X, 1))
+
     b1 = zeros(128)
     W2 = 0.01 * randn(size(X, 1), 128)
     b2 = zeros(size(X, 1))
-    return W2 * max.(W1*X .+ b1, 0) .+ b2
 
+    print("\n type  of W1 ",typeof(W1))
+    print("\n type of X ",typeof(X))
+    
+    # Layer # 1
+    l1 = W1 * X 
+    l1 = l1 + b1 
+
+    ## Activation
+    l1 = relu(l1)
+    
+    ## Layer # 2
+    l2 =  W2  * l1 
+
+    y_pred = l2 + b2
+    
+    return y_pred
 
 end
 
 function Transformer_Block(X)
 
     X_att = multihead_attention(X)
-    print("Size of X_att ",size(X_att))
+
+    print("\n Size of X_att ",size(X_att))
+    print("\n Size of X ",size(X))
+    
     X = X + X_att
 
-    ##
+    print("Type of X is :", typeof(X))
+    ## 
     X_ff = feed_forward(X)
+
     X = X + X_ff
     print("Size of X after network : ", size(X))
 
@@ -214,7 +274,11 @@ function Transformer_Block(X)
 end
 
 
-W_out = 0.01 .* randn(vocab_size, d_model)
+W_out = 0.01 * randn(vocab_size, d_model)
+
+function last_column(X::trnsf_Node)
+    return X[:, size(X, 2)]
+end
 
 function predict(seq, P)
 
@@ -225,24 +289,28 @@ function predict(seq, P)
     X = X + P 
 
     X = Transformer_Block(X)
-    
+    print("\n Type of X", typeof(X),"\n")
+    print("\n Type of X", typeof(W_out),"\n")
     ## (23000, 64) * (64, last token) taking the last token and multiplying it. 
     ## will give the probability distribution over 23000 words which then fed to softmax
-    logits = W_out * X[:, end]
+    last_token = last_column(X)
+    logits = W_out * last_token
 
-    print(" Size of logits :", size(logits))
-    return softmax(W_out * X[:, end])  # predict next word based on last token
+    return softmax_node(logits)  # predict next word based on last token
 
 end
+
 
 first_seq = X[1]
 
 P = 0.01 * randn(d_model, block_size)
 
+print("\n tye of P :" ,typeof(P))
+
 pred = predict(first_seq, P)
 
 println("size of the pred is : ",size(pred))
 
-pred_id = argmax(pred)
+pred_id = argmax(pred.value)
 
 println("Predicted next word ", id2word[pred_id])
