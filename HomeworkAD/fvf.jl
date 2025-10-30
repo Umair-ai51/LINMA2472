@@ -1,3 +1,4 @@
+## Correct the implemention fo relu 
 module VectReverse
 
 mutable struct VectNode
@@ -56,9 +57,9 @@ end
 
 ## intitalize the nodes derivatives to zero
 
-#function relu(x::VectNode)
-#    return VectNode(:relu, [x], max.(0, x.value))
-#end
+function relu(x::VectNode)
+    return VectNode(:relu, [x], max.(0, x.value))
+end
 
 
 function VectNode(op, args, value)
@@ -73,7 +74,6 @@ end
 
 ## Defining Constructors for the inputs
 ## For AbstractMatrix
-
 VectNode(value::Number) = VectNode(nothing, VectNode[], value, zero(value))
 
 VectNode(value::AbstractArray) = VectNode(nothing, VectNode[], value, zeros(size(value)))
@@ -119,10 +119,11 @@ Base.:-(x::AbstractArray, y::VectNode) = VectNode(:-, [VectNode(x), y], x .- y.v
 Base.:*(x::VectNode, y::VectNode) = begin
     xv, yv = x.value, y.value
     result = if isa(xv, AbstractVector) && isa(yv, AbstractVector)
-
+	
         xv' * yv             # dot product
-    else
-        xv * yv              # normal matrix/number multiplication
+	else 
+		xv * yv
+           # normal matrix/number multiplication
     end
     VectNode(:*, [x, y], result)
 end  
@@ -232,8 +233,6 @@ function backward!(f::VectNode)
 			xv, yv = x.value, y.value
 			grad = node.derivative
 			
-			#println("shape of grad_ in before  extractions ", size(grad))
-			#println("shape of grad_ in after extractions ", size(grad))
 			
 			# scalar * scalar -> scalar
 			if isa(xv, Number) && isa(yv, Number)
@@ -241,9 +240,9 @@ function backward!(f::VectNode)
 				y.derivative += grad * xv
 
 			# vector (n) dot vector (n) -> scalar: xv' * yv
-			#elseif isa(xv, AbstractVector) && isa(yv, AbstractVector) && ndims(xv) == 1 && ndims(yv) == 1
-			#	x.derivative .+= grad * yv
-			#		y.derivative .+= grad * xv
+			elseif isa(xv, AbstractVector) && isa(yv, AbstractVector) && ndims(xv) == 1 && ndims(yv) == 1
+				x.derivative .+= grad * yv
+				y.derivative .+= grad * xv
 
 			# matrix * matrix (or matrix * vector) -> general matrix multiplication
 			elseif isa(xv, AbstractArray) && isa(yv, AbstractArray)
@@ -334,11 +333,8 @@ end
 
 
 function gradient!(f, g::Flatten, x::Flatten)
-
-
 	x_nodes = Flatten(VectNode.(x.components))
 	expr = f(x_nodes)
-
 	backward!(expr)
 	for i in eachindex(x.components)
 		g.components[i] .= x_nodes.components[i].derivative
@@ -349,4 +345,3 @@ end
 gradient(f, x) = gradient!(f, zero(x), x)
 
 end
-

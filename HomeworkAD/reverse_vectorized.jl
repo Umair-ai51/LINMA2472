@@ -81,6 +81,7 @@ Base.:-(x::AbstractArray, y::VectNode) = VectNode(:-, [VectNode(x), y], x .- y.v
 Base.:*(x::VectNode, y::VectNode) = begin
     xv, yv = x.value, y.value
     val = if isa(xv, AbstractVector) && isa(yv, AbstractVector)
+    
         xv' * yv
     else
         xv * yv
@@ -154,7 +155,9 @@ function backward!(f::VectNode)
             if isa(xv, Number) && isa(yv, Number)
                 x.derivative += grad * yv
                 y.derivative += grad * xv
+                
             elseif isa(xv, AbstractArray) && isa(yv, AbstractArray)
+
                 x.derivative .+= grad * yv'
                 y.derivative .+= xv' * grad
             else
@@ -202,6 +205,7 @@ function backward!(f::VectNode)
     end
 end
 
+
 # ======================================================================================
 # OPTIMIZED: Single forward pass computes BOTH value tangents AND gradient tangents!
 # ======================================================================================
@@ -223,6 +227,7 @@ function forward_hessian_vector!(f::VectNode)
     
     # Initialize value tangents for leaf nodes from their tangent field
     for node in sorted_nodes
+        
         if isnothing(node.op)
             value_tangents[node] = node.tangent
         end
@@ -326,6 +331,7 @@ function forward_hessian_vector!(f::VectNode)
     for node in sorted_nodes
         node.tangent = zero(node.derivative)
     end
+    
     sorted_nodes[end].tangent = 0.0
     
     for node in reverse(sorted_nodes)
@@ -453,12 +459,14 @@ function Hv(f::Function, x::Flatten, v::Vector)
     """
     
     # Step 1: Build graph
+    ## just using x we make the whole expression graph 
     x_nodes = [VectNode(xi) for xi in x.components]
     x_flat = Flatten(x_nodes)
     expr = f(x_flat)
     
     # Step 2: Backward pass - compute gradients
     all_nodes = topo_sort(expr)
+
     for node in all_nodes
         node.derivative = zero(node.value)
     end
@@ -469,9 +477,11 @@ function Hv(f::Function, x::Flatten, v::Vector)
     for node in x_nodes
         n = length(node.value)
         tangent_val = reshape(v[offset+1:offset+n], size(node.value))
+        
         node.tangent = tangent_val
         offset += n
     end
+    
     
     # Single optimized forward pass!
     forward_hessian_vector!(expr)
@@ -512,12 +522,18 @@ function flatten_tangent(tangents::Vector)
 end
 
 function hessian(f::Function, x::Flatten)
+    
+    ## each component has two inputs x and y
+    # take the total sum to get the lengt
     total_len = sum(length.(x.components))
+    ## intialize the hessian for these inputs 
     H = zeros(total_len, total_len)
+ 
 
     for j in 1:total_len
         v = zeros(total_len)
         v[j] = 1.0
+        #println("Seed vector v = ", v)
         
         Hv_col = Hv(f, x, v)
         Hv_vec = flatten_tangent(Hv_col)
