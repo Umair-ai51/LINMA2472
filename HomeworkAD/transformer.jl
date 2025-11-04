@@ -25,8 +25,7 @@ println("First 20 unique words: ", unique_words[1:20])
 
 ## Defining the structur fo reverse Ad
 
-mutable struct trnsf_Node
-
+mutable struct trnsf_Node                  # unique node id
     op::Union{Nothing, Symbol}
     args::Vector{trnsf_Node}
     value::Any
@@ -34,6 +33,51 @@ mutable struct trnsf_Node
     meta::Any
 
 end
+
+# -------------------------
+# Graph printing helper
+# -------------------------
+function node_label(node::trnsf_Node)
+    op = isnothing(node.op) ? "Leaf" : string(node.op)
+    shape = try
+        size(node.value)
+    catch
+        "(unknown size)"
+    end
+    meta_str = haskey(node.meta, :inds) ? " inds=$(node.meta[:inds])" : ""
+    return "$op | shape=$shape$meta_str"
+end
+
+function print_graph(node::trnsf_Node; indent::Int=0, visited=Set{UInt}())
+    nid = objectid(node)  # UInt
+    indent_str = " " ^ indent
+
+    if nid in visited
+        println(indent_str, "↳ [shared node] ", node_label(node), " (id=$(nid))")
+        return
+    end
+    push!(visited, nid)
+
+    # Print this node
+    println(indent_str, "Node id=$(nid): ", node_label(node))
+
+    # Recursively print parents / args
+    for arg in node.args
+        print_graph(arg; indent=indent+4, visited=visited)
+    end
+end
+
+
+# -------------------------
+# Usage after forward pass:
+# -------------------------
+# pred = predict(first_seq, P)
+# println("\n=== Expression graph (detailed) ===")
+# print_graph(pred)
+# println("\n=== Expression graph (tree) ===")
+# print_graph_tree(pred)
+
+
 
 ## define constructors for operations
 trnsf_Node(op,args, value) = trnsf_Node(op, args, value, zeros(size(value)),  Dict(:shape => size(value)))
@@ -140,15 +184,11 @@ d_model = 64
 
 ## randomly intialize weights and it uses column definition
 
-
 W_embed = 0.01  * randn(d_model, vocab_size)
-
-
 
 function embed(seq::Vector{Int})
     return hcat([W_embed.value[:, id] for id in seq]...)
 end
-
 
 function attention(Q, K, V)
 
@@ -266,7 +306,7 @@ function Transformer_Block(X)
     print("Type of X is :", typeof(X))
     ## 
     X_ff = feed_forward(X)
-
+    print("Size of X_ff", size(X_ff))
     X = X + X_ff
     print("Size of X after network : ", size(X))
 
@@ -289,11 +329,15 @@ function predict(seq, P)
     X = X + P 
 
     X = Transformer_Block(X)
-    print("\n Type of X", typeof(X),"\n")
-    print("\n Type of X", typeof(W_out),"\n")
+    print("\n Type of X", size(X),"\n")
+    print("\n Type of W_out", size(W_out),"\n")
+
     ## (23000, 64) * (64, last token) taking the last token and multiplying it. 
     ## will give the probability distribution over 23000 words which then fed to softmax
+
     last_token = last_column(X)
+
+    print("The shape of last token iis",size(last_token))
     logits = W_out * last_token
 
     return softmax_node(logits)  # predict next word based on last token
@@ -314,3 +358,5 @@ println("size of the pred is : ",size(pred))
 pred_id = argmax(pred.value)
 
 println("Predicted next word ", id2word[pred_id])
+
+
