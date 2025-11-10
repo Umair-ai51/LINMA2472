@@ -12,9 +12,9 @@ include(joinpath(LabAD, "solution", "forward.jl"))
 
 #run_gradient_tests(Forward.gradient, VectReverse.gradient)
 
-include(joinpath(@__DIR__, "fvf.jl"))
+include(joinpath(@__DIR__, "reverse_vectorized.jl"))
 
-run_gradient_tests(Forward.gradient, VectReverse.gradient)
+run_gradient_tests(Forward.gradient, ForwardOverReverse.gradient)
 
 
 ## Second order

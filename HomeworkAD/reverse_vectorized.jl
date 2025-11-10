@@ -7,7 +7,7 @@ import ..Flatten
 # -----------------------
 mutable struct VectNode
     op::Union{Nothing, Symbol}
-    args::Vector{VectNode}
+    args::Vector{VectNode} # vector of nodes [x, y] but their value could be matrices inputs are defined as vectors 
     value::Any
     derivative::Any
     tangent::Any
@@ -15,6 +15,7 @@ end
 
 VectNode(x::Number) = VectNode(nothing, VectNode[], x, zero(x), zero(x))
 
+## we want the forward pass to smoothly other wise in comparision we get bool values
 function VectNode(op, args::Vector{VectNode}, value)
     if isa(value, Number)
         derivative = 0.0
@@ -27,7 +28,7 @@ function VectNode(op, args::Vector{VectNode}, value)
 end
 
 function VectNode(x::AbstractArray)
-    # Always use Float64 for derivatives and tangents, even if input is Bool/BitArray
+    # Always use Float64 for derivatives and tangents, if input is Bool/BitArray
     derivative = zeros(Float64, size(x))
     tangent = zeros(Float64, size(x))
     return VectNode(nothing, VectNode[], float.(x), derivative, tangent)
@@ -58,7 +59,7 @@ function Base.broadcasted(op::Function, x::Union{AbstractArray, Number}, y::Vect
 end
 
 function Base.broadcasted(::typeof(Base.literal_pow), ::typeof(^), x::VectNode, ::Val{y}) where {y}
-    result = x.value .^ y
+    result = broadcast(^, x.value, y)
     return VectNode(:^, [x], result)
 end
 
@@ -80,14 +81,10 @@ Base.:-(x::AbstractArray, y::VectNode) = VectNode(:-, [VectNode(x), y], x .- y.v
 
 Base.:*(x::VectNode, y::VectNode) = begin
     xv, yv = x.value, y.value
-    val = if isa(xv, AbstractVector) && isa(yv, AbstractVector)
-    
-        xv' * yv
-    else
-        xv * yv
-    end
+    val =  xv * yv
     VectNode(:*, [x, y], val)
 end
+
 Base.:*(x::VectNode, y::Number) = VectNode(:*, [x, VectNode(y)], x.value * y)
 Base.:*(x::Number, y::VectNode) = VectNode(:*, [VectNode(x), y], x * y.value)
 Base.:*(x::VectNode, y::AbstractArray) = VectNode(:*, [x, VectNode(y)], x.value * y)
@@ -139,7 +136,9 @@ function backward!(f::VectNode)
     for node in reverse(sorted_nodes)
         if isnothing(node.op)
             continue
+
         elseif node.op == :+
+            ## if x =[1 1 ; 1 1] , y = [1, 1 ; 1 ,1 ] z = [1, 1; 1 1] x. y => [0+1 , 0+1 ; 0+1 0+1]
             for a in node.args
                 a.derivative .+= node.derivative
             end
@@ -147,6 +146,7 @@ function backward!(f::VectNode)
             x, y = node.args
             x.derivative .+= node.derivative
             y.derivative .+= -node.derivative
+
         elseif node.op == :*
             x, y = node.args
             xv, yv = x.value, y.value
@@ -171,9 +171,6 @@ function backward!(f::VectNode)
             if isa(xv, Number) && isa(yv, Number)
                 x.derivative += grad / yv
                 y.derivative += grad * (-xv / yv^2)
-            else
-                x.derivative .+= grad ./ yv
-                y.derivative .+= grad .* (-xv ./ yv.^2)
             end
         elseif node.op == :tanh
             arg = node.args[1]
@@ -188,14 +185,19 @@ function backward!(f::VectNode)
             end
         elseif node.op == :exp
             arg = node.args[1]
+            ## multiply ex ith reverse tangnet because derivative of ex = itself
             arg.derivative .+= node.derivative .* node.value
+
         elseif node.op == :log
             arg = node.args[1]
+            # derivative of logx  = 1/x so the input divide by node.deritive 
             arg.derivative .+= node.derivative ./ arg.value
         elseif node.op == :relu
             arg = node.args[1]
+            ## derivative of relu will be one for the values > 1 
             relu_grad = float.(arg.value .>= 0)
             arg.derivative .+= node.derivative .* relu_grad
+
         elseif node.op == :sum
             arg = node.args[1]
             arg.derivative .+= node.derivative
@@ -223,6 +225,8 @@ function forward_hessian_vector!(f::VectNode)
     - Input nodes must have node.tangent seeded with direction v
     """
     sorted_nodes = topo_sort(f)
+    ## storing value tangents in the dictionary why??
+
     value_tangents = Dict{VectNode, Any}()
     
     # Initialize value tangents for leaf nodes from their tangent field
@@ -254,6 +258,7 @@ function forward_hessian_vector!(f::VectNode)
             
         elseif node.op == :-
             x, y = node.args
+            ## value_tangents[x] gives the tangent of the node 
             value_tangents[node] = value_tangents[x] .- value_tangents[y]
             
         elseif node.op == :*
@@ -264,6 +269,7 @@ function forward_hessian_vector!(f::VectNode)
             # Value tangent: product rule
             if isa(xv, Number) && isa(yv, Number)
                 value_tangents[node] = xt * yv + xv * yt
+
             elseif isa(xv, AbstractArray) && isa(yv, AbstractArray)
                 value_tangents[node] = xt * yv + xv * yt
             else
@@ -278,8 +284,6 @@ function forward_hessian_vector!(f::VectNode)
             # Value tangent: quotient rule
             if isa(xv, Number) && isa(yv, Number)
                 value_tangents[node] = (xt * yv - xv * yt) / (yv^2)
-            else
-                value_tangents[node] = (xt .* yv .- xv .* yt) ./ (yv.^2)
             end
             
         elseif node.op == :^
@@ -298,6 +302,8 @@ function forward_hessian_vector!(f::VectNode)
         elseif node.op == :tanh
             arg = node.args[1]
             sech2 = 1 .- node.value.^2
+            ## dtanh = 1 - node.value^2
+            ## sech^2 .* value_tangents (1-tanh(x) * d(x))
             value_tangents[node] = sech2 .* value_tangents[arg]
             
         elseif node.op == :exp
@@ -306,6 +312,7 @@ function forward_hessian_vector!(f::VectNode)
             
         elseif node.op == :log
             arg = node.args[1]
+            ## dlog(x) =   1/x * d(x)
             value_tangents[node] = value_tangents[arg] ./ arg.value
             
         elseif node.op == :relu
@@ -357,6 +364,7 @@ function forward_hessian_vector!(f::VectNode)
             val_tan_y = value_tangents[y]
             
             # Differentiate backward rule: x.derivative += grad * y
+            ## Differentiate 2nd rule: d(grad * y) ==> 2nd order * y2 +  
             if isa(xv, Number) && isa(yv, Number)
                 x.tangent += grad_tan * yv + grad * val_tan_y
                 y.tangent += val_tan_x * grad + xv * grad_tan
@@ -377,10 +385,13 @@ function forward_hessian_vector!(f::VectNode)
             val_tan_y = value_tangents[y]
             
             if isa(xv, Number) && isa(yv, Number)
+                ## the first term differentiates gradient and second term differentiates constant because d(grad/y) => 
+                ## 2nd order grad/constant(y) - grad * d(y)/y^2 according to the or what
                 x.tangent += grad_tan/yv - grad*val_tan_y/(yv^2)
                 y.tangent += grad_tan*(-xv/yv^2) + grad*(2*xv*val_tan_y/yv^3 - val_tan_x/yv^2)
             else
                 x.tangent .+= grad_tan ./ yv .- grad .* val_tan_y ./ (yv.^2)
+                ## product rule with quotient rule 
                 y.tangent .+= grad_tan .* (-xv ./ yv.^2) .+ grad .* (2 .* xv .* val_tan_y ./ yv.^3 .- val_tan_x ./ yv.^2)
             end
             
@@ -395,6 +406,7 @@ function forward_hessian_vector!(f::VectNode)
             if isa(xv, AbstractArray)
                 arg.tangent .+= grad_tan .* (n .* xv.^(n-1)) .+ grad .* (n .* (n-1) .* xv.^(n-2)) .* val_tan
             else
+                ## grad * n* x^n-1 = > grad * conn + grad * n(n-1) (power rule again with respect ot the input )
                 arg.tangent += grad_tan * (n * xv^(n-1)) + grad * (n * (n-1) * xv^(n-2)) * val_tan
             end
             
@@ -407,6 +419,7 @@ function forward_hessian_vector!(f::VectNode)
             val_tan = value_tangents[arg]
             
             g_prime = -2 .* y .* sech2
+            ## grad_tan .* sech2 + grad d(sech2x) . val_tan(x)  
             arg.tangent .+= grad_tan .* sech2 .+ grad .* g_prime .* val_tan
             
         elseif node.op == :exp
@@ -472,21 +485,25 @@ function Hv(f::Function, x::Flatten, v::Vector)
     end
     backward!(expr)
     
-    # Step 3: Seed input tangents with v
+    # Step 3: Seed input tangents with v which will set [1,0,0,0,0,0,0,0] => tangent_value x = [1,0; 0,0], y = [0,0;0,0]
     offset = 0
     for node in x_nodes
         n = length(node.value)
         tangent_val = reshape(v[offset+1:offset+n], size(node.value))
-        
+        print(tangent_val)
         node.tangent = tangent_val
         offset += n
     end
     
+    print("\n DONE \n")
     
     # Single optimized forward pass!
     forward_hessian_vector!(expr)
     
     # Result is in x_nodes[i].tangent (gradient tangent = H*v)
+    for node in x_nodes
+        print(node.tangent) 
+    end
     return [node.tangent for node in x_nodes]
 end
 
@@ -536,6 +553,8 @@ function hessian(f::Function, x::Flatten)
         #println("Seed vector v = ", v)
         
         Hv_col = Hv(f, x, v)
+        ## for first pass if X =[x11 x12 x13 x13], W = [W11, W12, W13, W14] => 
+        ## v = [1,0,0,0.....] X[11] W[11] then X[12] W[12] X[13] W[13] for X11 we get W11 
         Hv_vec = flatten_tangent(Hv_col)
         H[:, j] .= Hv_vec
     end

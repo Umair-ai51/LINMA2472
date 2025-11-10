@@ -31,7 +31,7 @@ mutable struct trnsf_Node                  # unique node id
     args::Vector{trnsf_Node}
     value::Any
     derivative::Any
-    meta::Any
+    meta::Dict{Symbol, Any} 
 
 end
 
@@ -107,6 +107,7 @@ Base.:+(x::trnsf_Node, y::AbstractVector) = trnsf_Node(:+, [x, trnsf_Node(y)], x
 
 
 Base.:-(x::trnsf_Node, y::AbstractArray) = trnsf_Node(:-, [x, trnsf_Node(y)], x.value .- y)
+Base.:-(x::trnsf_Node) = trnsf_Node(:neg, [x], -x.value)
 
 ## Overloading the adjoint 
 Base.:adjoint(x::trnsf_Node) = trnsf_Node(:adjoint, [x], x.value')
@@ -230,7 +231,9 @@ W_embed = trnsf_Node(randn(d_model, vocab_size))
 
 function embed(seq::Vector{Int})
     X_emb = hcat([W_embed.value[:, id] for id in seq]...)
-    return trnsf_Node(:embed, [W_embed], X_emb)
+    node = trnsf_Node(:embed, [W_embed], X_emb)
+    node.meta[:seq] = seq  # Store the sequence for backward pass
+    return node
 end
 
 function attention(Q::trnsf_Node, K::trnsf_Node, V::trnsf_Node; mask=false)
@@ -253,7 +256,7 @@ function attention(Q::trnsf_Node, K::trnsf_Node, V::trnsf_Node; mask=false)
     print("\n The size of V:", size(V))
 
   
-    print(dk)
+    print("\n Type of DK \n", typeof(dk))
     scores = (Q' * K) / sqrt(dk) ## Query and token 10x10
 
     ## convert the similarity to positive using exp
@@ -481,95 +484,6 @@ function topological_sort(node::trnsf_Node)
     return sorted_order
 end
 
-function backward(Node::trnsf_Node)
-    ## topological order to get the nodes sorted.
-    sorted_order = topological_sort(Node)
-
-    ## start with reverse oreder.
-    Node.derivative = 1
-
-    for node in reverse(sorted_order)
-        print("\n Size :",size(node.value))
-        print("\n Op ", node.op)
-    
-
-        ## iterate over every node
-        if isnothing(node.op)
-            continue
-        elseif node.op == :+
-            x,y = node.args
-            print("\n Size of x", size(x))
-            print("\n Size of y", size(y))
-
-            ## included for the bias 
-            if length(x) == 2 && length(y) == 2  
-                for arg in node.args
-                    arg.derivative .+= node.derivative
-                end
-            end
-
-        elseif node.op == :- && length(node.args) == 2
-
-            print("\n The size of node", node.op)
-            print("\n The size of node", size(node.value))
-
-            x,y = node.args
-            x.derivative .+= node.derivative
-            y.derivative .+= -node.derivative
-
-        elseif node.op == :- && length(node.args) == 1
-            x = node.args[1]
-            x.derivative = node.derivative * -1
-
-        elseif node.op == :*
-            x,y = node.args
-            print("\n The size of x in * op", size(x.value))
-            print("\n The size of y in * op", size(y.value))
-            print("\n The size of nd in * op", size(node.derivative))
-            
-            if isa(x.value, AbstractArray) && isa(y.value, AbstractArray)
-                x.derivative += node.derivative * y.value'
-                y.derivative += x.value' * node.derivative
-            
-            elseif isa(x.value, Number) && isa(y.value, AbstractArray)
-                print("\n The x.valye is ",x.value)
-                ## this is removed because we were implement W =  (rand) 
-                #x.derivative += node.derivative * y.value'
-                y.derivative +=  node.derivative
-            
-            end
-
-        elseif node.op == :/
-            x,y = node.args
-            println("Backward getindex: size(x.dev)=", size(x.derivative),", size(incoming)=", size(node.derivative))
-            ## case handled
-            if isa(x.value, AbstractArray) && isa(y.value, Number)
-            
-                x.derivative .+= node.derivative .* y.value
-                y.derivative .+= x.value' * node.derivative
-            end
-
-        elseif node.op == :log
-            x = node.args[1]
-            x.derivative = node.derivative .* 1/x.value
-        
-        elseif node.op == :softmax
-            x = node.args[1]
-            s = node.value
-            
-            x.derivative = node.value .* (node.derivative .- sum(node.value .* node.derivative; dims=2))
-
-        elseif node.op == :relu
-            x = node.args[1]
-            grad_relu = (x.value .> 0)
-            x.derivative = grad_relu .* node.derivative
-        else
-            error(" The opertion `node.op` is not implemented")
-        end
-
-    end
-end
-
 
 function topological_sort(node::trnsf_Node)
     ## define visted block
@@ -597,9 +511,9 @@ function topological_sort(node::trnsf_Node)
     return sorted_order
 end
 
-function backward(Node::trnsf_Node)
+function backward(node::trnsf_Node)
     ## topological order to get the nodes sorted.
-    sorted_order = topological_sort(Node)
+    sorted_order = topological_sort(node)
 
     ## start with reverse oreder.
     node.derivative = 1
@@ -662,8 +576,14 @@ function backward(Node::trnsf_Node)
             ## case handled
             if isa(x.value, AbstractArray) && isa(y.value, Number)
             
-                x.derivative .+= node.derivative .* y.value
-                y.derivative .+= x.value' * node.derivative
+                x.derivative .+= node.derivative ./ y.value
+
+                if isa(y.derivative, AbstractArray)
+                    print("\n Scaler y.derivaitve")
+                    y.derivative .+= sum(-x.value .* node.derivative) / (y.value^2)
+                else
+                    y.derivative += sum(-x.value .* node.derivative) / (y.value^2)
+                end
             end
 
         elseif node.op == :log
@@ -672,38 +592,96 @@ function backward(Node::trnsf_Node)
         
         elseif node.op == :getindex
             inds = node.meta[:inds]
-            print("\n Inside gt ",inds)
+            print("\n Inside gt ", inds)
             x = node.args[1]
 
-            ##intialize parents 
-            ## two cases
+                ##intialize parents 
+                ## two cases
             if isa(inds, Tuple)
                 row_inds, col_inds = inds
-                ## the comming derivaitve should only be updates for the selected colums
+                ## the coming derivative should only be updated for the selected columns
                 ## normally the last one 
-                x.derivative[row_inds, col_inds] .+= node.derivative
+        
+                # Check if node.derivative is a scalar or array
+                if isa(node.derivative, AbstractArray)
+                    x.derivative[row_inds, col_inds] .+= node.derivative
+                else
+                    # node.derivative is a scalar (e.g., from prob[tgt, t])
+                    x.derivative[row_inds, col_inds] += node.derivative
+                end
             else
                 idx = inds
-                x.derivative[idx] += node.derivative
-            end
-
+                if isa(node.derivative, AbstractArray)
+                    x.derivative[idx] .+= node.derivative
+                else    
+                    x.derivative[idx] += node.derivative
+                end
+        end
             print("\n Size of x.dev" , size(x.derivative))
             println("Backward getindex: size(x.dev)=", size(x.derivative),
         ", size(incoming)=", size(node.derivative))
-      
+        
+        elseif node.op == :adjoint
+            x = node.args[1]
+            # Gradient of transpose: just transpose the incoming gradient back
+            x.derivative .+= node.derivative'
+
         elseif node.op == :softmax
             x = node.args[1]
             s = node.value
             
             x.derivative = node.value .* (node.derivative .- sum(node.value .* node.derivative; dims=2))
-
+        
+        
         elseif node.op == :relu
             x = node.args[1]
             grad_relu = (x.value .> 0)
             x.derivative = grad_relu .* node.derivative
+            
         elseif node.op == :neg
             x = node.args[1]
-            x.derivative += node.derivaitve * (-1/ seq_len)
+            # Gradient of -x is just -1
+            if isa(x.derivative, AbstractArray)
+                x.derivative .+= -node.derivative
+            else
+                x.derivative += -node.derivative
+            end
+        elseif node.op == :concat
+    # node.args is a vector of head nodes that were concatenated
+    # node.value is the result of vcat([h.value for h in heads]...)
+    # node.derivative has the same shape as node.value
+    
+    # Split the incoming gradient back to each head
+            heads = node.args
+            d_model_per_head = size(heads[1].value, 1)  # number of rows per head
+    
+            start_row = 1
+            for head in heads
+                n_rows = size(head.value, 1)
+        # Extract the gradient slice for this head
+                head.derivative .+= node.derivative[start_row:start_row + n_rows - 1, :]
+                start_row += n_rows
+            end
+        
+        elseif node.op == :masked_scores
+            x = node.args[1]
+            x.derivative .+= node.derivative
+
+        elseif node.op == :embed
+            W = node.args[1]            # W_embed node
+            seq = node.meta[:seq]       # stored sequence indices
+            dnode = node.derivative      # already numeric
+
+            for (i, idx) in enumerate(seq)
+                if isa(dnode, AbstractArray)
+                    W.derivative[:, idx] .+= dnode[:, i]
+                else
+                    W.derivative[:, idx] .+= fill(dnode, size(W.derivative, 1))
+                end
+            end
+
+
+        
         else
             error(" The opertion `node.op` is not implemented")
         end
@@ -752,16 +730,68 @@ for t in 1:seq_len
     p_t = prob[tgt, t]
 
     ## create a log node
-    log_p = trnsf_Node(:log, [p_t], log.(p_t.value))
+    log_p = trnsf_Node(:log, [p_t], log(p_t.value))
 
     ## accumulate
     sum_logs = sum_logs + log_p
 
 end
 
-loss_node = trnsf_Node(:neg, [sum_logs], -sum_logs.value / seq_len)
+mean_log = sum_logs / seq_len
+
+loss_node = trnsf_Node(:neg, [mean_log], -mean_log.value)
 
 println("Loss (mean NLL): ", loss_node.value)
 
 # Backpropagate through the whole expression graph:
 backward(loss_node)   # your backward function expects a trnsf_Node
+
+
+
+# Learning rate
+η = 1e-3
+
+# Number of training steps
+num_steps = 3
+
+for step in 1:num_steps
+    # Pick a training example
+    first_seq = X[step]
+    first_seq = embed(first_seq)
+    
+    P = trnsf_Node(randn(d_model, block_size))  # positional encoding
+    
+    # Forward pass
+    encoder_out = encoder(first_seq, P)
+    X_decoded = decoder_block(first_seq, encoder_out)
+    W_out = trnsf_Node(randn(vocab_size, d_model))
+    logits = W_out * X_decoded
+    prob = softmax_node(logits)
+    
+    # Compute NLL loss
+    target_seq = Y[step]
+    seq_len = size(X_decoded, 2)
+    sum_logs = trnsf_Node(0.0)
+
+    for t in 1:seq_len
+        tgt = target_seq[t]
+        p_t = prob[tgt, t]
+        log_p = trnsf_Node(:log, [p_t], log(p_t.value))
+        sum_logs = sum_logs + log_p
+    end
+    mean_log = sum_logs / seq_len
+    loss_node = trnsf_Node(:neg, [mean_log], -mean_log.value)
+    
+    # Print current loss
+    println("Step $step, Loss = ", loss_node.value)
+    
+    # Backward pass
+    backward(loss_node)
+    
+    # Gradient descent update for embedding weights (example)
+    for i in 1:vocab_size
+        W_embed.value[:, i] .-= η * W_embed.derivative[:, i]
+    end
+    
+    # You’d also need to update W_out and other parameters similarly
+end
