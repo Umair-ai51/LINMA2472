@@ -610,7 +610,7 @@ function backward(Node::trnsf_Node)
     
 
         ## iterate over every node
-        if isnothing(node.op)
+        if isnothing(node.op)a
             continue
         elseif node.op == :+
             x,y = node.args

@@ -164,8 +164,6 @@ function analyze_graph(node::trnsf_Node; indent::Int=0, visited=Set{UInt}())
 end
 
 
-
-
 ###########
 ##-------------
 ## The Problem We need to overload the index so we could get the index of 
@@ -180,14 +178,12 @@ end
 
  
 ##-------------
-function softmax_node(scores::trnsf_Node)
-
+function softmax_node(scores::trnsf_Node; eps=1e-9)
     score_stable = scores.value .- maximum(scores.value, dims=2)
-    exp_scores = exp.(score_stable)
-    softmax_Scores = exp_scores ./ sum(exp_scores, dims=2)
-
+    exp_scores = exp.(clamp.(score_stable, -50, 50))  # clip extreme values
+    softmax_Scores = exp_scores ./ (sum(exp_scores, dims=2) .+ eps)
+    softmax_Scores = clamp.(softmax_Scores, eps, 1.0 - eps)  # prevent zeros
     return trnsf_Node(:softmax, [scores], softmax_Scores)
-
 end
 
 ##--------------------------------
@@ -246,26 +242,26 @@ function attention(Q::trnsf_Node, K::trnsf_Node, V::trnsf_Node; mask=false)
     ## q1 the : k1 the, k2 cat 
     ## q2 cat : cat    
     ## how each token attend to another token
-    print("\n The size of Q :", typeof(Q))
-    print("\n The size of Q:", size(Q))
+    #print("\n The size of Q :", typeof(Q))
+    #print("\n The size of Q:", size(Q))
 
 
-    print("\n The size of K :", typeof(K))
-    print("\n The size of K:", size(K))
+    #print("\n The size of K :", typeof(K))
+    #print("\n The size of K:", size(K))
 
-    print("\n The size of V :", typeof(V))
-    print("\n The size of V:", size(V))
+    #print("\n The size of V :", typeof(V))
+    #print("\n The size of V:", size(V))
 
   
-    print("\n Type of DK \n", typeof(dk))
+    #print("\n Type of DK \n", typeof(dk))
     scores = (Q' * K) / sqrt(dk) ## Query and token 10x10
 
     ## convert the similarity to positive using exp
     ## subtract from max to avoid large value
     ## divide by sum
     ## for single word what is the prob of the next word 10,10
-    print("\n The size of scores:", size(scores))
-    print("\n The type of scores:", typeof(scores))
+    #print("\n The size of scores:", size(scores))
+    #print("\n The type of scores:", typeof(scores))
     
     if mask 
         seq_len = size(scores, 2)
@@ -273,7 +269,7 @@ function attention(Q::trnsf_Node, K::trnsf_Node, V::trnsf_Node; mask=false)
         scores = trnsf_Node(:masked_scores, [trnsf_Node(scores.value)], scores.value .+ mask_matrix)
     end
 
-    print("\n Type of ", typeof(scores))
+    #print("\n Type of ", typeof(scores))
     
     scores = softmax_node(scores)
 
@@ -291,13 +287,13 @@ function multihead_attention(X, num_heads=4)
     #print("Type of X in MT",typeof(X))
     #print(size(X.value))
     ## extract the 64,10
-    print("\n X in att_head", typeof(X))
-    print("\n X in att_head", size(X))
+    #print("\n X in att_head", typeof(X))
+    #print("\n X in att_head", size(X))
 
     d_model = size(X, 1)
 
-    print("\n d_model", typeof(d_model))
-    print("\n d_model", size(d_model))
+    #print("\n d_model", typeof(d_model))
+    #print("\n d_model", size(d_model))
 
     d_head = div(d_model, num_heads)
 
@@ -306,11 +302,11 @@ function multihead_attention(X, num_heads=4)
     WK = [trnsf_Node(randn(d_head, d_model)) for _ in 1:num_heads]
     WV = [trnsf_Node(randn(d_head, d_model)) for _ in 1:num_heads]
     
-    print("Type of WQ ", typeof(WQ),"\n")
-    print("Type of X ", typeof(X),"\n")
+    #print("Type of WQ ", typeof(WQ),"\n")
+    #print("Type of X ", typeof(X),"\n")
 
-    print("size of WQ ", size(WQ[1].value),"\n")
-    print("size of X ", size(X.value),"\n")
+    #print("size of WQ ", size(WQ[1].value),"\n")
+    #print("size of X ", size(X.value),"\n")
 
     heads = []
     
@@ -322,7 +318,7 @@ function multihead_attention(X, num_heads=4)
     
     end
 
-    print("Size of heads",size(heads))
+    #print("Size of heads",size(heads))
     X_att = trnsf_Node(:concat, heads, vcat([h.value for h in heads]...))
 
     return X_att
@@ -332,8 +328,8 @@ function Transformer_Block(X)
 
     X_att = multihead_attention(X)
 
-    print("\n Size of X_att ",size(X_att))
-    print("\n Size of X ",size(X))
+    #print("\n Size of X_att ",size(X_att))
+    #print("\n Size of X ",size(X))
     
     X = X + X_att
     return X
@@ -690,6 +686,7 @@ function backward(node::trnsf_Node)
     end
 end
 
+
 first_seq = X[1]
 println("size of first seq: ", size(first_seq))
 
@@ -733,6 +730,39 @@ println("Initial Loss (mean NLL): ", loss_node.value)
 # Backpropagate
 backward(loss_node)
 
+###################################
+
+## Training 
+
+###################################
+
+# Embedding
+W_embed = trnsf_Node(randn(d_model, vocab_size))
+
+# Positional encoding (fixed)
+P = trnsf_Node(randn(d_model, block_size))
+
+# Output projection
+W_out = trnsf_Node(randn(vocab_size, d_model))
+
+# Multihead attention parameters
+num_heads = 4
+d_head = div(d_model, num_heads)
+
+WQ_enc = [trnsf_Node(randn(d_head, d_model)) for _ in 1:num_heads]
+WK_enc = [trnsf_Node(randn(d_head, d_model)) for _ in 1:num_heads]
+WV_enc = [trnsf_Node(randn(d_head, d_model)) for _ in 1:num_heads]
+
+WQ_dec = [trnsf_Node(randn(d_head, d_model)) for _ in 1:num_heads]
+WK_dec = [trnsf_Node(randn(d_head, d_model)) for _ in 1:num_heads]
+WV_dec = [trnsf_Node(randn(d_head, d_model)) for _ in 1:num_heads]
+
+# Feed-forward layers
+W1_ff = trnsf_Node(randn(128, d_model))
+b1_ff = trnsf_Node(zeros(128))
+W2_ff = trnsf_Node(randn(d_model, 128))
+b2_ff = trnsf_Node(zeros(d_model))
+
 println("\n=== Starting Training ===\n")
 
 # Helper function to safely extract gradients
@@ -743,12 +773,33 @@ function get_gradient(node::trnsf_Node)
         return node.derivative
     end
 end
+function collect_params(node::trnsf_Node, params=Set{trnsf_Node}())
+    if node.op === nothing  # leaf node
+        if isa(node.value, AbstractArray)
+            push!(params, node)
+        end
+    end
+    for arg in node.args
+        collect_params(arg, params)
+    end
+    return params
+end
+
+function reset_grads!(params)
+    for p in params
+        if isa(p.derivative, AbstractArray)
+            p.derivative .= 0.0
+        elseif isa(p.derivative, Number)
+            p.derivative = 0.0
+        end
+    end
+end
+
+
 
 # Training hyperparameters
-η = 1e-3
-num_steps = 3
-
-# Training loop
+η = 1e-4
+num_steps = 10
 for step in 1:num_steps
     println("\n--- Training Step $step ---")
     
@@ -759,47 +810,50 @@ for step in 1:num_steps
     # Embed the sequence
     seq_embedded = embed(seq)
     
-    # Positional encoding (should be fixed, not random each time ideally)
+    # Positional encoding (should ideally be fixed, not random each time)
     P = trnsf_Node(randn(d_model, block_size))
     
     # Forward pass
     enc_out = encoder(seq_embedded, P)
     dec_out = decoder_block(seq_embedded, enc_out)
     
-    # Output projection
+    # Output projection (vocab)
     W_out = trnsf_Node(randn(vocab_size, d_model))
     logits = W_out * dec_out
     probs = softmax_node(logits)
     
-    # Compute loss
+    # Compute mean negative log-likelihood loss
     seq_len = size(dec_out, 2)
     sum_logs = trnsf_Node(0.0)
-    
     for t in 1:seq_len
         tgt = target[t]
         p_t = probs[tgt, t]
         log_p = trnsf_Node(:log, [p_t], log(p_t.value))
         sum_logs = sum_logs + log_p
     end
-    
     mean_log = sum_logs / seq_len
     loss = trnsf_Node(:neg, [mean_log], -mean_log.value)
-    print("\n ################ \n")
-    println("Loss: ", loss.value)
-    print("\n ################ \n")
+    
+    println("\nLoss: ", loss.value)
+    
     # Backward pass
     backward(loss)
     
-    # Update W_embed only (as an example)
-    grad = get_gradient(W_embed)
+    # Collect all trainable parameters automatically
+    params = collect_params(loss)
+    println("Updating ", length(params), " trainable parameters.")
     
-    # Gxradient descent update
-    for i in 1:vocab_size
-        W_embed.value[:, i] .-= η * grad[:, i]
+    # Gradient descent update for all parameters
+    for p in params
+        if isa(p.value, AbstractArray) && isa(p.derivative, AbstractArray)
+            p.value .-= η .* p.derivative
+        elseif isa(p.value, Number)
+            p.value -= η * p.derivative
+        end
     end
     
-    # Reset gradients
-    W_embed.derivative .= 0.0
+    # Reset all gradients
+    reset_grads!(params)
     
     println("Step $step complete")
 end
