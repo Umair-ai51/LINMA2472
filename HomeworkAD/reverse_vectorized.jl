@@ -67,6 +67,7 @@ end
 # Operator Overloads
 # -----------------------
 
+Base.transpose(x::VectNode) = VectNode(:transpose, [x], x.value')
 Base.:+(x::VectNode, y::VectNode) = VectNode(:+, [x, y], x.value + y.value)
 Base.:+(x::VectNode, y::Number) = VectNode(:+, [x, VectNode(y)], x.value + y)
 Base.:+(x::Number, y::VectNode) = VectNode(:+, [VectNode(x), y], x + y.value)
@@ -137,32 +138,64 @@ function backward!(f::VectNode)
         if isnothing(node.op)
             continue
 
+        # ----------------- +
         elseif node.op == :+
-            ## if x =[1 1 ; 1 1] , y = [1, 1 ; 1 ,1 ] z = [1, 1; 1 1] x. y => [0+1 , 0+1 ; 0+1 0+1]
             for a in node.args
-                a.derivative .+= node.derivative
+                # Cas scalaire
+                if isa(a.derivative, Number) && isa(node.derivative, Number)
+                    a.derivative += node.derivative
+
+                # Même shape => propag direct
+                elseif size(a.derivative) == size(node.derivative)
+                    a.derivative .+= node.derivative
+
+                # Cas biais : vecteur + matrice (broadcast sur la 2e dim)
+                elseif ndims(a.derivative) == 1 && ndims(node.derivative) == 2 &&
+                       length(a.derivative) == size(node.derivative, 1)
+                    # On somme sur la dimension "temps" / colonnes
+                    a.derivative .+= sum(node.derivative, dims = 2)[:]
+
+                else
+                    error("Broadcast gradient for + not implemented for shapes " *
+                          "$(size(a.derivative)) and $(size(node.derivative))")
+                end
             end
+
+        # ----------------- -
         elseif node.op == :-
             x, y = node.args
             x.derivative .+= node.derivative
             y.derivative .+= -node.derivative
 
+        # ----------------- *
         elseif node.op == :*
             x, y = node.args
             xv, yv = x.value, y.value
             grad = node.derivative
-            
+
             if isa(xv, Number) && isa(yv, Number)
+                # scalaire * scalaire
                 x.derivative += grad * yv
                 y.derivative += grad * xv
-                
-            elseif isa(xv, AbstractArray) && isa(yv, AbstractArray)
 
-                x.derivative .+= grad * yv'
-                y.derivative .+= xv' * grad
+            elseif isa(xv, AbstractArray) && isa(yv, AbstractArray)
+                # Cas 1 : produit élément par élément (broadcast .*)
+                if size(node.value) == size(xv) == size(yv)
+                    # z = x .* y  => dL/dx += grad .* y ; dL/dy += grad .* x
+                    x.derivative .+= grad .* yv
+                    y.derivative .+= grad .* xv
+                else
+                    # Cas 2 : vrai produit matriciel z = x * y
+                    # x : (m×k), y : (k×n), grad : (m×n)
+                    x.derivative .+= grad * yv'
+                    y.derivative .+= xv' * grad
+                end
+
             else
                 error("Unhandled * case with types: $(typeof(xv)), $(typeof(yv))")
             end
+
+        # ----------------- /
         elseif node.op == :/
             x, y = node.args
             xv, yv = x.value, y.value
@@ -172,9 +205,13 @@ function backward!(f::VectNode)
                 x.derivative += grad / yv
                 y.derivative += grad * (-xv / yv^2)
             end
+
+        # ----------------- tanh
         elseif node.op == :tanh
             arg = node.args[1]
             arg.derivative .+= node.derivative .* (1 .- node.value.^2)
+
+        # ----------------- ^
         elseif node.op == :^
             arg = node.args[1]
             n = 2
@@ -183,29 +220,40 @@ function backward!(f::VectNode)
             else
                 arg.derivative += node.derivative * (n * arg.value^(n-1))
             end
+
+        # ----------------- exp
         elseif node.op == :exp
             arg = node.args[1]
-            ## multiply ex ith reverse tangnet because derivative of ex = itself
             arg.derivative .+= node.derivative .* node.value
 
+        # ----------------- log
         elseif node.op == :log
             arg = node.args[1]
-            # derivative of logx  = 1/x so the input divide by node.deritive 
             arg.derivative .+= node.derivative ./ arg.value
+
+        # ----------------- relu
         elseif node.op == :relu
             arg = node.args[1]
-            ## derivative of relu will be one for the values > 1 
             relu_grad = float.(arg.value .>= 0)
             arg.derivative .+= node.derivative .* relu_grad
 
+        # ----------------- sum
         elseif node.op == :sum
             arg = node.args[1]
             arg.derivative .+= node.derivative
+        
+        # ----------------- transpose
+        elseif node.op == :transpose
+            arg = node.args[1]
+            arg.derivative .+= node.derivative'
+
         else
             error("Op $(node.op) not implemented in backward!")
         end
     end
 end
+
+
 
 
 # ======================================================================================
@@ -323,6 +371,12 @@ function forward_hessian_vector!(f::VectNode)
         elseif node.op == :sum
             arg = node.args[1]
             value_tangents[node] = sum(value_tangents[arg])
+        
+        elseif node.op == :transpose
+            arg = node.args[1]
+            # value_tangent of x' is (value_tangent of x)'
+            value_tangents[node] = value_tangents[arg]'
+
             
         else
             error("Op not implemented in forward pass!")
@@ -450,6 +504,12 @@ function forward_hessian_vector!(f::VectNode)
         elseif node.op == :sum
             arg = node.args[1]
             arg.tangent .+= node.tangent
+
+        elseif node.op == :transpose
+            arg = node.args[1]
+            # gradient tangent propagates through transpose the same way
+            arg.tangent .+= node.tangent'
+
             
         else
             error("Op not implemented in gradient tangent!")
@@ -490,7 +550,6 @@ function Hv(f::Function, x::Flatten, v::Vector)
     for node in x_nodes
         n = length(node.value)
         tangent_val = reshape(v[offset+1:offset+n], size(node.value))
-        print(tangent_val)
         node.tangent = tangent_val
         offset += n
     end
