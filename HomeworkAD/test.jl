@@ -35,9 +35,6 @@ mutable struct trnsf_Node                  # unique node id
 
 end
 
-
-
-
 ## Fixed constructors
 
 ## Constructor for operations (arrays)
@@ -139,19 +136,6 @@ function Base.getindex(x::trnsf_Node, row_inds::Union{Colon, Int}, col_inds::Uni
     return new_node
 end
 
- 
-##-------------
-#= function softmax_node(scores::trnsf_Node; eps=1e-9)
-    #score_stable = scores.value .- maximum(scores.value, dims=2)
-    #exp_scores = exp.(clamp.(score_stable, -50, 50))  # clip extreme values
-    #softmax_Scores = exp_scores ./ (sum(exp_scores, dims=2) .+ eps)
-    #softmax_Scores = clamp.(softmax_Scores, eps, 1.0 - eps)  # prevent zeros
-    #return trnsf_Node(:softmax, [scores], softmax_Scores)
-    stable = scores.value .- maximum(scores.value, dims=1)
-    exp_s = exp.(clamp.(stable, -50, 50))
-    sm = exp_s ./ (sum(exp_s, dims=1) .+ eps)
-    return trnsf_Node(:softmax, [scores], sm)
-end =#
 
 function softmax_node(scores::trnsf_Node; eps=1e-12)
     max_val = maximum(scores.value, dims=1)
@@ -209,61 +193,20 @@ function backward(node::trnsf_Node)
                 end
             end
 
-        #= elseif node.op == :- && length(node.args) == 2
-            x, y = node.args
-            # Handle x gradient
-            if size(x.derivative) == size(node.derivative)
-                if isa(x.derivative, AbstractArray)
-                    x.derivative .+= node.derivative
-                else
-                    x.derivative += node.derivative
-                end
-            else
-                x.derivative .+= sum(node.derivative, dims=2)
-            end
-            
-            # Handle y gradient
-            if size(y.derivative) == size(node.derivative)
-                if isa(y.derivative, AbstractArray)
-                    y.derivative .+= -node.derivative
-                else
-                    y.derivative += -node.derivative
-                end
-            else
-                y.derivative .+= -sum(node.derivative, dims=2)
-            end
- =#
         elseif node.op == :*
             x, y = node.args
-            
-            #if isa(x.value, AbstractArray) && isa(y.value, AbstractArray)
-                x.derivative .+= node.derivative * y.value'
-                y.derivative .+= x.value' * node.derivative
-           #=  elseif isa(x.value, Number) && isa(y.value, AbstractArray)
-                # Scalar times array
-                if isa(x.derivative, Number)
-                    x.derivative += sum(node.derivative .* y.value)
-                else
-                    x.derivative .+= node.derivative .* y.value
-                end
-                y.derivative .+= x.value .* node.derivative =#
-            #end
+            x.derivative .+= node.derivative * y.value'
+            y.derivative .+= x.value' * node.derivative
+           
 
         elseif node.op == :/
             x, y = node.args
-            
-        #=     if isa(x.value, AbstractArray) && isa(y.value, AbstractArray)
+            if isa(x.derivative, AbstractArray)
                 x.derivative .+= node.derivative ./ y.value
-                y.derivative .-= node.derivative .* x.value ./ (y.value .^ 2)
-            else =#
-                # Handle scalar division
-                ## don't care about y because it x/y y representt (q' K) / dim(K) = no need to change dim K
-                if isa(x.derivative, AbstractArray)
-                    x.derivative .+= node.derivative ./ y.value
-                else
-                    x.derivative += node.derivative / y.value
-                end
-            #end
+            else
+                x.derivative += node.derivative / y.value
+            end
+            
 
         elseif node.op == :log
             x = node.args[1]
@@ -294,12 +237,7 @@ function backward(node::trnsf_Node)
         
         elseif node.op == :relu
             x = node.args[1]
-            #grad_relu = (x.value .> 0)
-            #if isa(x.derivative, AbstractArray)
-            #    x.derivative .+= grad_relu .* node.derivative
-            #else
-                x.derivative .+= (x.value .> 0) .* node.derivative
-            #end
+            x.derivative .+= (x.value .> 0) .* node.derivative            
             
         elseif node.op == :neg
             x = node.args[1]
@@ -374,37 +312,9 @@ using Random
 vocab_size = length(unique_words)
 d_model = 64    
 
-# ===== GLOBAL PARAMETER INITIALIZATION =====
-# Embedding
-# 64 ,23000 
-#W_embed = trnsf_Node(randn(d_model, vocab_size)*0.01)
-
-# Positional encoding (fixed)
-#P = trnsf_Node(randn(d_model, block_size)*0.01)
-
-# Output projection
-#W_out = trnsf_Node(randn(vocab_size, d_model)*0.01)
-
-# Multihead attention parameters
 num_heads = 4
 d_head = div(d_model, num_heads)
 
-#= # Encoder attention weights
-WQ_enc = [trnsf_Node(randn(d_head, d_model)*0.01) for _ in 1:num_heads]
-WK_enc = [trnsf_Node(randn(d_head, d_model)*0.01) for _ in 1:num_heads]
-WV_enc = [trnsf_Node(randn(d_head, d_model)*0.01) for _ in 1:num_heads]
-
-# Decoder attention weights  
-WQ_dec = [trnsf_Node(randn(d_head, d_model)*0.01) for _ in 1:num_heads]
-WK_dec = [trnsf_Node(randn(d_head, d_model)*0.01) for _ in 1:num_heads]
-WV_dec = [trnsf_Node(randn(d_head, d_model)*0.01) for _ in 1:num_heads]
-
-# Feed-forward layers
-W1_ff = trnsf_Node(randn(128, d_model)*0.01)
-b1_ff = trnsf_Node(zeros(128))
-W2_ff = trnsf_Node(randn(d_model, 128)*0.01)
-b2_ff = trnsf_Node(zeros(d_model))
- =#
 xavier(dims...) = randn(dims...) * sqrt(2.0/ sum(dims))
 
 WQ_enc = [trnsf_Node(xavier(d_head, d_model)) for _ in 1:num_heads]
@@ -563,10 +473,11 @@ function reset_grads!(params)
 end
 
 # ===== TRAINING LOOP =====
+
 println("\n=== Starting Training ===\n")
 
 # Training hyperparameters
-n_start = 7e-3
+n_start = 5e-3
 n_end = 1e-5
 num_steps = min(10, length(X))  # Ensure we don't exceed available data
 epochs = 5000
@@ -648,6 +559,5 @@ for step in 1:epochs
     
     #println("Step $step complete")
 end
-
 
 println("\n=== Training Complete ===")

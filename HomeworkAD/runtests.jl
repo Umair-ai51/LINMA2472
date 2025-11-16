@@ -24,3 +24,10 @@ run_gradient_tests(Forward.gradient, ForwardOverReverse.gradient)
 include(joinpath(@__DIR__, "reverse_vectorized.jl"))
 
 run_gradient_tests(Forward.hessian, ForwardOverReverse.hessian, hessian = true)
+
+
+include(joinpath(@__DIR__, "G.jl"))
+using .TinyTransformer1
+
+θ = TinyTransformer1.train(num_steps = 200)   
+m = TinyTransformer1.unflatten(θ)   

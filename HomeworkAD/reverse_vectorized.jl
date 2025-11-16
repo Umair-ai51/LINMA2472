@@ -67,6 +67,11 @@ end
 # Operator Overloads
 # -----------------------
 
+###
+# Transformer
+###
+
+
 Base.:+(x::VectNode, y::VectNode) = VectNode(:+, [x, y], x.value + y.value)
 Base.:+(x::VectNode, y::Number) = VectNode(:+, [x, VectNode(y)], x.value + y)
 Base.:+(x::Number, y::VectNode) = VectNode(:+, [VectNode(x), y], x + y.value)
@@ -103,6 +108,16 @@ Base.sum(x::VectNode) = VectNode(:sum, [x], sum(x.value))
 
 function relu(x::VectNode)
     return VectNode(:relu, [x], max.(0, x.value))
+end
+
+# Create a VectNode representing transpose(A) (i.e. A')
+function Base.transpose(x::VectNode)
+    return VectNode(:transpose, [x], x.value')
+end
+
+# Create a VectNode representing adjoint(A) (alias of transpose here for real arrays)
+function Base.adjoint(x::VectNode)
+    return VectNode(:adjoint, [x], x.value')
 end
 
 # -----------------------
@@ -201,6 +216,11 @@ function backward!(f::VectNode)
         elseif node.op == :sum
             arg = node.args[1]
             arg.derivative .+= node.derivative
+        elseif node.op == :transpose || node.op == :adjoint
+            arg = node.args[1]
+            # d/dA of (A') is (d/dZ)' where Z is A'
+            arg.derivative .+= node.derivative'
+
         else
             error("Op $(node.op) not implemented in backward!")
         end
@@ -490,7 +510,7 @@ function Hv(f::Function, x::Flatten, v::Vector)
     for node in x_nodes
         n = length(node.value)
         tangent_val = reshape(v[offset+1:offset+n], size(node.value))
-        print(tangent_val)
+        ## storing forward tangent for each node
         node.tangent = tangent_val
         offset += n
     end
