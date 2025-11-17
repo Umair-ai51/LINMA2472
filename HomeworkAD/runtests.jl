@@ -24,21 +24,8 @@ include(joinpath(@__DIR__, "reverse_vectorized.jl"))
 # We only test `hessian` and not `hvp` but if `hessian` is implemented
 # by reusing `hvp`, this is testing both at the same time.
 
-include(joinpath(@__DIR__, "reverse_vectorized.jl"))
+#include(joinpath(@__DIR__, "reverse_vectorized.jl"))
 
 run_gradient_tests(Forward.hessian, ForwardOverReverse.hessian, hessian = true)
 
-
-include(joinpath(@__DIR__, "G.jl"))
-using .TinyTransformer1
-
-θ = TinyTransformer1.train(num_steps = 200)   
-m = TinyTransformer1.unflatten(θ)   
-#run_gradient_tests(Forward.hessian, ForwardOverReverse.hessian, hessian = true)
-
-include(joinpath(@__DIR__, "transformer_v5.jl"))
-using .TinyTransformer1
-
-θ = TinyTransformer1.train(num_steps = 200)   
-m = TinyTransformer1.unflatten(θ)          
 

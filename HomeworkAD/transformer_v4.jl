@@ -3,21 +3,26 @@ using Unicode
 using Flux
 using Statistics
 
+
 # 1. Download dataset
 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 resp = HTTP.get(url)
 text = String(resp.body)
 
-# 2. Preprocess: lowercase, remove unwanted characters (optional)
+# 2. Preprocess: lowercase, keep a reasonable set of chars
 text = lowercase(text)
-# Keep letters, numbers, punctuation, and spaces
+# Keep letters, numbers, punctuation, spaces and newlines
 text = filter(c -> isletter(c) || isspace(c) || isdigit(c) || c in ['.',',','!','?',';',':','\'','"','-'], text)
 
-# 3. Tokenize by whitespace
-words = split(text)
+# 3. Work at character level
+chars = collect(text)                
+unique_chars = unique(chars)      
 
-# 4. Get unique words
-unique_words = unique(words)
+# 4. Display info
+println("Total chars: ", length(chars))
+println("Unique chars: ", length(unique_chars))
+println("Unique chars themselves: ", unique_chars)
+
 
 # 5. Display info
 println("Total words: ", length(words))
@@ -279,21 +284,20 @@ function backward(node::trnsf_Node)
     end
 end
 
-word2id = Dict{String, Int}()
-id2word = Dict{Int, String}()
+char2id = Dict{Char, Int}()
+id2char = Dict{Int, Char}()
 
-for (i, w) in enumerate(unique_words)
-
-
-    word2id[w] = i
-    id2word[i] = w
+for (i, c) in enumerate(unique_chars)
+    char2id[c] = i
+    id2char[i] = c
 end
 
-encoded_text = [word2id[w] for w in words]
+encoded_text = [char2id[c] for c in chars]  # Vector{Int}
 
 
 
-block_size = 10
+
+block_size = 32
 X = []
 Y = []
 
@@ -309,8 +313,9 @@ println("Length of X: ", length(X))
 using LinearAlgebra
 using Random
 
-vocab_size = length(unique_words)
-d_model = 64    
+vocab_size = length(unique_chars)
+d_model = 64              # can stay the same for now
+   
 
 num_heads = 4
 d_head = div(d_model, num_heads)
@@ -474,90 +479,74 @@ end
 
 # ===== TRAINING LOOP =====
 
-println("\n=== Starting Training ===\n")
-
-# Training hyperparameters
-n_start = 5e-3
-n_end = 1e-5
-num_steps = min(10, length(X))  # Ensure we don't exceed available data
-epochs = 5000
-
-losses = Float64[]
- 
-for step in 1:epochs
-    #println("\n--- Training Step $step ---")
+function train!(n_epochs::Int; η_start=0.005, η_end=1e-5)
+    global losses
+    losses = Float64[]
     
-    ## Decay learning rate
-    progress = step/epochs
-    n = n_start * (1-progress) + n_end * progress
-    # Get training sample random
-    idx = rand(1:length(X))
-    seq = X[idx]
-    target = Y[idx]
-    
-    # Embed the sequence (uses global W_embed)
-    seq_embedded = embed(seq)
-        
-        # Forward pass (uses all global parameters)
-    enc_out = encoder(seq_embedded, P)
-    dec_out = decoder_block(seq_embedded, enc_out)
-    
-    # Output projection (uses global W_out)
-    ########################
+    total_steps = n_epochs * length(X)
+    step = 0
 
-    ########################
-    logits = W_out * dec_out
-    #scaler
+    println("\n=== Starting Training ===\n")
 
-    probs = softmax_node(logits)
-    
-    # Compute mean negative log-likelihood loss
-    seq_len = size(dec_out, 2)
-    sum_logs = trnsf_Node(0.0)
+    for epoch in 1:n_epochs
+        idxs = shuffle(1:length(X))   # random order each epoch
 
-    for t in 1:seq_len
-        ## get the target index
-        tgt = target[t]
-        
-        ## get the prob index 
-        #scaler
-        p_t = probs[tgt, t]
-        ## added smoothign
-        log_p = trnsf_Node(:log, [p_t], log((p_t.value + 1e-9)))
-        sum_logs = sum_logs + log_p
-    end
+        for idx in idxs
+            step += 1
 
-    mean_log = sum_logs / trnsf_Node(seq_len)
-    
-    loss = trnsf_Node(:neg, [mean_log], -mean_log.value)
-    #println("Loss: ", loss.value)
-    
-    # Backward pass
-    backward(loss)
-    push!(losses, loss.value)
+            # Learning rate schedule (linear decay)
+            progress = step / total_steps
+            η = η_start * (1 - progress) + η_end * progress
 
-    # Collect all trainable parameters automatically
-    params = collect_params(loss)
-    #println("Updating ", length(params), " trainable parameters.")
-    
-    # Gradient descent update for all parameters
-    for p in params
-        if isa(p.value, AbstractArray) && isa(p.derivative, AbstractArray)
-            p.value .-= n .* p.derivative
-        elseif isa(p.value, Number)
-            p.value -= n * p.derivative
+            seq    = X[idx]
+            target = Y[idx]
+
+            # ----- Forward pass -----
+            seq_embedded = embed(seq)
+
+            enc_out = encoder(seq_embedded, P)
+            dec_out = decoder_block(seq_embedded, enc_out)
+
+            logits = W_out * dec_out
+            probs  = softmax_node(logits)
+
+            seq_len = size(dec_out, 2)
+
+            sum_logs = trnsf_Node(0.0)
+            for t in 1:seq_len
+                tgt = target[t]
+                p_t = probs[tgt, t]
+                log_p = trnsf_Node(:log, [p_t], log(p_t.value + 1e-9))
+                sum_logs = sum_logs + log_p
+            end
+
+            mean_log = sum_logs / trnsf_Node(seq_len)
+            loss = trnsf_Node(:neg, [mean_log], -mean_log.value)
+
+            # ----- Backward -----
+            backward(loss)
+            push!(losses, loss.value)
+
+            # Collect and update parameters
+            params = collect_params(loss)
+
+            for p in params
+                if isa(p.value, AbstractArray) && isa(p.derivative, AbstractArray)
+                    p.value .-= η .* p.derivative
+                elseif isa(p.value, Number)
+                    p.value -= η * p.derivative
+                end
+            end
+
+            reset_grads!(params)
+
+            # Logging
+            if step % 1000 == 0
+                avg_loss = mean(losses[max(1, end-999):end])
+                println("step $step | epoch $epoch | loss: $(round(loss.value, digits=3)) | avg1000: $(round(avg_loss, digits=3)) | LR: $(round(η, digits=5))")
+            end
         end
     end
-        
-    ## print progress
-    if step % 100 == 0
-        avg_loss = mean(losses[max(1, end-99):end])
-        println("step $step | Loss : $(round(loss.value, digits=3)) | Avg100: $(round(avg_loss, digits=3)) | LR: $(round(n, digits=5))")
-    # Reset all gradients
-    end
-    reset_grads!(params)
-    
-    #println("Step $step complete")
-end
 
-println("\n=== Training Complete ===")
+    println("\n=== Training Complete ===")
+end
