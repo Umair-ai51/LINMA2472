@@ -165,19 +165,15 @@ function train(; d_model=32, num_steps=200, lr=1e-3)
     θ = flatten(model0)
 
     for step in 1:num_steps
-        # 1) Gradient avec ForwardOverReverse (θ est Flatten{Array})
         g = gradient(loss_fn, θ)
 
-        # 2) Mise à jour SGD
         for i in eachindex(θ.components)
             θ.components[i] .-= lr .* g.components[i]
         end
 
-        # 3) Logging : on ré-évalue la loss avec des VectNode
         if step % 20 == 0
-            # On recrée une version "AD" des paramètres pour loss_fn
             θ_nodes = Flatten(VectNode.(θ.components))
-            L = loss_fn(θ_nodes)      # L est un VectNode
+            L = loss_fn(θ_nodes) 
             println("step $step  loss = ", L.value)
         end
     end

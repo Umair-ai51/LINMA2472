@@ -1,9 +1,14 @@
+
 using HTTP
 using Unicode
 using Flux
 using Statistics
 
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 683f111 (new transformmer)
 # 1. Download dataset
 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 resp = HTTP.get(url)
@@ -17,17 +22,21 @@ text = filter(c -> isletter(c) || isspace(c) || isdigit(c) || c in ['.',',','!',
 # 3. Work at character level
 chars = collect(text)                
 unique_chars = unique(chars)      
+<<<<<<< HEAD
 
 # 4. Display info
 println("Total chars: ", length(chars))
 println("Unique chars: ", length(unique_chars))
 println("Unique chars themselves: ", unique_chars)
 
+=======
 
-# 5. Display info
-println("Total words: ", length(words))
-println("Unique words: ", length(unique_words))
-println("First 20 unique words: ", unique_words[1:20])
+# 4. Display info
+println("Total chars: ", length(chars))
+println("Unique chars: ", length(unique_chars))
+println("Unique chars themselves: ", unique_chars)
+>>>>>>> 683f111 (new transformmer)
+
 
 ## Defining the structur fo reverse Ad
 
@@ -314,7 +323,11 @@ using LinearAlgebra
 using Random
 
 vocab_size = length(unique_chars)
+<<<<<<< HEAD
 d_model = 64              # can stay the same for now
+=======
+d_model = 64           # can stay the same for now
+>>>>>>> 683f111 (new transformmer)
    
 
 num_heads = 4
@@ -476,77 +489,136 @@ function reset_grads!(params)
         end
     end
 end
+X = X[1:10000]
+Y = Y[1:10000]
+
+println("Training on a subset of 10000 sequences.")
 
 # ===== TRAINING LOOP =====
 
-function train!(n_epochs::Int; η_start=0.005, η_end=1e-5)
+function train!(num_steps::Int; η=0.001)
     global losses
     losses = Float64[]
-    
-    total_steps = n_epochs * length(X)
-    step = 0
 
     println("\n=== Starting Training ===\n")
 
-    for epoch in 1:n_epochs
-        idxs = shuffle(1:length(X))   # random order each epoch
+    for step in 1:num_steps
+        idx = rand(1:length(X))   # sample ONE training example
 
-        for idx in idxs
-            step += 1
+        seq    = X[idx]
+        target = Y[idx]
 
-            # Learning rate schedule (linear decay)
-            progress = step / total_steps
-            η = η_start * (1 - progress) + η_end * progress
+        # Forward
+        seq_embedded = embed(seq)
+        enc_out  = encoder(seq_embedded, P)
+        dec_out  = decoder_block(seq_embedded, enc_out)
+        logits   = W_out * dec_out
+        probs    = softmax_node(logits)
 
-            seq    = X[idx]
-            target = Y[idx]
+        seq_len = size(dec_out, 2)
 
-            # ----- Forward pass -----
-            seq_embedded = embed(seq)
+        sum_logs = trnsf_Node(0.0)
+        for t in 1:seq_len
+            tgt = target[t]
+            p_t = probs[tgt, t]
+            log_p = trnsf_Node(:log, [p_t], log(p_t.value + 1e-9))
+            sum_logs = sum_logs + log_p
+        end
 
-            enc_out = encoder(seq_embedded, P)
-            dec_out = decoder_block(seq_embedded, enc_out)
+        mean_log = sum_logs / trnsf_Node(seq_len)
+        loss = trnsf_Node(:neg, [mean_log], -mean_log.value)
 
-            logits = W_out * dec_out
-            probs  = softmax_node(logits)
+        # Backward
+        backward(loss)
+        push!(losses, loss.value)
 
-            seq_len = size(dec_out, 2)
+        params = collect_params(loss)
+        for p in params
+            p.value .-= η .* p.derivative
+        end
 
-            sum_logs = trnsf_Node(0.0)
-            for t in 1:seq_len
-                tgt = target[t]
-                p_t = probs[tgt, t]
-                log_p = trnsf_Node(:log, [p_t], log(p_t.value + 1e-9))
-                sum_logs = sum_logs + log_p
-            end
+        reset_grads!(params)
 
-            mean_log = sum_logs / trnsf_Node(seq_len)
-            loss = trnsf_Node(:neg, [mean_log], -mean_log.value)
-
-            # ----- Backward -----
-            backward(loss)
-            push!(losses, loss.value)
-
-            # Collect and update parameters
-            params = collect_params(loss)
-
-            for p in params
-                if isa(p.value, AbstractArray) && isa(p.derivative, AbstractArray)
-                    p.value .-= η .* p.derivative
-                elseif isa(p.value, Number)
-                    p.value -= η * p.derivative
-                end
-            end
-
-            reset_grads!(params)
-
-            # Logging
-            if step % 1000 == 0
-                avg_loss = mean(losses[max(1, end-999):end])
-                println("step $step | epoch $epoch | loss: $(round(loss.value, digits=3)) | avg1000: $(round(avg_loss, digits=3)) | LR: $(round(η, digits=5))")
-            end
+        if step % 100 == 0
+            println("step $step | loss=$(round(loss.value, digits=3))")
         end
     end
 
-    println("\n=== Training Complete ===")
+    println("\n=== Training Complete ===\n")
 end
+
+train!(50_000; η=5e-4)
+
+
+# Sample an index according to a probability vector
+function sample_from_probs(p::AbstractVector{<:Real}; T=1.0)
+    # apply temperature
+    logp = log.(p .+ 1e-12) ./ T
+    exps = exp.(logp)
+    pT = exps ./ sum(exps)
+    r = rand()
+    s = 0.0
+    for i in eachindex(pT)
+        s += pT[i]
+        if r <= s
+            return i
+        end
+    end
+    return length(pT)
+end
+
+
+
+function predict(seed_text::String, num_chars::Int; T=1.2)
+    global W_embed, P, W_out
+
+    # Convert seed text to IDs (skip unknown chars)
+    seq = [char2id[c] for c in seed_text if haskey(char2id, c)]
+    if isempty(seq)
+        error("Seed text contains no valid characters in vocabulary.")
+    end
+
+    # Pad left with spaces
+    space_id = char2id[' ']
+    while length(seq) < block_size
+        pushfirst!(seq, space_id)
+    end
+
+    for _ in 1:num_chars
+        ctx = seq[end-block_size+1:end]
+
+        # Forward pass
+        seq_embedded = embed(ctx)
+        enc_out      = encoder(seq_embedded, P)
+        dec_out      = decoder_block(seq_embedded, enc_out)
+        logits       = W_out * dec_out
+
+        # Last timestep logits
+        last_logits = logits.value[:, end]
+
+        # Stable softmax
+        shifted = last_logits .- maximum(last_logits)
+        exps = exp.(shifted)
+        probs = exps ./ sum(exps)          # <-- this was missing
+        probs = renormalize_clamped_probs(probs; pmax=0.2)
+
+        # Sample with temperature
+        next_id = sample_from_probs(probs; T=T)
+
+        push!(seq, next_id)
+    end
+
+    return join(id2char[id] for id in seq)
+end
+
+function renormalize_clamped_probs(p; pmax = 0.2)
+    p_clamped = min.(p, pmax)
+    return p_clamped ./ sum(p_clamped)
+end
+
+
+
+
+seed = "to be, or not to be, "
+println(predict(seed, 300; T=1.2))
+println(predict(seed, 300; T=1.5))
